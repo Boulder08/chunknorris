@@ -1,5 +1,5 @@
 # chunknorris
-A very simple PoC-like Python script to do chunked encoding using the aomenc CLI encoder.
+A very simple PoC-like Python script to do chunked, parallel encoding using the aomenc CLI encoder.
 
 Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended).
 Make sure you have ffmpeg and the encoder in PATH or where you run the script.
@@ -21,5 +21,7 @@ python chunk_norris.py greatmovie.avs 720p 16 120
 
 4. The encoding queue is ordered from longest to shortest chunk. This ensures that there will not be any single long encodes running at the end.
    The last scene is encoded in the first batch of chunks since we don't know its length based on the QP file.
+
+5. You can control the amount of parallel encodes by a parameter in the script (will probably be moved to a CLI parameter). Tune the amount according to your system, both CPU and memory-wise.
    
-5. The encoded chunks are concatenated in their original order to a Matroska container using ffmpeg.
+6. The encoded chunks are concatenated in their original order to a Matroska container using ffmpeg.
