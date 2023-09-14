@@ -6,6 +6,7 @@ Make sure you have ffmpeg and the encoder in PATH or where you run the script.
 
 Set common parameters in default_params and add/edit the presets as needed.
 Set base_working_folder and scene_change_file_path according to your folder structure.
+Set max_parallel_encodes to the maximum number of encodes you want to run simultaneously (tune according to your processor and memory usage!)
 
 Usage: python chunk_norris.py script.avs preset q min_chunk_length, for example:
 python chunk_norris.py greatmovie.avs 720p 16 120
