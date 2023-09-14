@@ -1,7 +1,7 @@
 # chunknorris
 A very simple PoC-like Python script to do chunked encoding using the aomenc CLI encoder.
 
-Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended)
+Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended).
 Make sure you have ffmpeg and the encoder in PATH or where you run the script.
 
 Set common parameters in default_params and add/edit the presets as needed.
