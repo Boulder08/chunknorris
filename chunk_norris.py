@@ -30,6 +30,9 @@ import subprocess
 import sys
 import concurrent.futures
 import shutil
+import argparse
+from tqdm import tqdm
+
 
 # Function to clean up a folder
 def clean_folder(folder):
@@ -40,6 +43,7 @@ def clean_folder(folder):
         elif os.path.isdir(item_path):
             shutil.rmtree(item_path)
 
+
 # Function to find the scene change file recursively
 def find_scene_change_file(start_dir, filename):
     for root, dirs, files in os.walk(start_dir):
@@ -47,30 +51,41 @@ def find_scene_change_file(start_dir, filename):
             return os.path.join(root, filename)
     return None
 
+
+parser = argparse.ArgumentParser()
+parser.add_argument('encode_script')
+parser.add_argument('--preset', nargs='?', default='1080p', type=str)
+parser.add_argument('--q', nargs='?', default=16, type=int)
+parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
+parser.add_argument('--max-parallel-encodes', nargs='?', default=10, type=int)
+parser.add_argument('--threads', nargs='?', default=8, type=int)
+parser.add_argument('--noiselevel', nargs='?', type=int)
+parser.add_argument('--graintable', nargs='?', type=str)
+
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
 
 # Set the QP file path
 scene_change_file_path = "F:\\Temp\\Captures"
 
-# Set the maximum number of parallel encodes
-max_parallel_encodes = 6
-
-# Check for command-line arguments
-if len(sys.argv) != 5:
-    print("Usage: python script.py encode_script.avs preset_name q min_chunk_length")
-    sys.exit(1)
-
 # Command-line arguments
-encode_script = sys.argv[1]
-preset_name = sys.argv[2]
-q = int(sys.argv[3])
-min_chunk_length = int(sys.argv[4])
+args = parser.parse_args()
+encode_script = args.encode_script
+preset = args.preset
+q = args.q
+min_chunk_length = args.min_chunk_length
+max_parallel_encodes = args.max_parallel_encodes
+threads = args.threads
+noiselevel = args.noiselevel
+graintable = args.graintable
+
+if noiselevel is None:
+    noiselevel = 0
 
 # Define default encoding parameters common to each preset as a list
 default_params = [
     "--cpu-used=3",
-    "--threads=8",
+    f"--threads={threads}",
     "--bit-depth=10",
     "--end-usage=q",
     "--aq-mode=0",
@@ -87,14 +102,15 @@ default_params = [
     "--kf-max-dist=480",
     "--disable-trellis-quant=0",
     "--enable-dnl-denoising=0",
-    "--denoise-noise-level=0",
+    f"--denoise-noise-level={noiselevel}",
+    f"--film-grain-table={graintable}",
     "--enable-keyframe-filtering=1",
     "--tile-columns=0",
     "--tile-rows=0",
-    "--sharpness=3",
+    "--sharpness=2",
     "--enable-cdef=0",
     "--enable-fwd-kf=1",
-    "--arnr-strength=1",
+    "--arnr-strength=0",
     "--arnr-maxframes=5",
     "--quant-b-adapt=1"
 ]
@@ -114,7 +130,7 @@ presets = {
         # Add more parameters as needed
     ],
     # Add more presets as needed
-}.get(preset_name, [])
+}.get(preset, [])
 
 # Merge default parameters and preset parameters into a single list
 encode_params = default_params + presets
@@ -166,9 +182,9 @@ for i, start_frame in enumerate(scene_changes):
     print(f"Scene {i}: Start Frame: {start_frame}, End Frame: {end_frame}")
 
 # Step 2: Encode the Scenes
-encode_commands = [] # List to store the encoding commands
+encode_commands = []  # List to store the encoding commands
 input_files = []  # List to store input files for concatenation
-chunklist = [] # Helper list for producing the encoding and concatenation lists
+chunklist = []  # Helper list for producing the encoding and concatenation lists
 
 i = 0
 combined = False
@@ -235,7 +251,8 @@ for i in chunklist:
     "avs2yuv64.exe",
     "-no-mt",
     scene_script_file,  # Use the Avisynth script for this scene
-    "-"
+    "-",
+    "2> nul"
     ]
 
     aomenc_command = [
@@ -271,18 +288,24 @@ def run_encode_command(command):
 # Run encoding commands with a set maximum of concurrent processes
 completed_chunks = []
 
+# Create a tqdm progress bar
+progress_bar = tqdm(total=len(chunklist), desc="Progress", unit="step")
+
 with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
     futures = {executor.submit(run_encode_command, cmd): cmd for cmd in encode_commands}
     for future in concurrent.futures.as_completed(futures):
         output_chunk = future.result()
+        progress_bar.update(1)
         completed_chunks.append(output_chunk)
-        print(f"Encoding for scene completed: {output_chunk}")
+        # print(f"Encoding for scene completed: {output_chunk}")
 
 # Wait for all encoding processes to finish before concatenating
+progress_bar.close()
 print("Encoding for all scenes completed.")
 
 # Output final video file name
-output_final_ffmpeg = os.path.join(output_folder, f"output_final.mkv")
+output_name = os.path.splitext(os.path.basename(encode_script))[0]
+output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
 
 # Create a list file for input files
 input_list_txt = os.path.join(chunks_folder, "input_list.txt")
