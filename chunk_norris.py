@@ -27,6 +27,7 @@
 
 import os
 import subprocess
+import re
 import sys
 import concurrent.futures
 import shutil
@@ -52,15 +53,65 @@ def find_scene_change_file(start_dir, filename):
     return None
 
 
+def ffscd(encode_script):
+    # Step 1: Detect Scene Changes
+    scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+    scene_change_command = [
+        "ffmpeg",
+        "-i", encode_script,
+        "-vf", f"select='gt(scene,{scdthresh})',metadata=print",
+        "-an", "-f", "null",
+        "-",
+    ]
+
+    # Redirect stderr to the CSV file
+    with open(scene_change_csv, "w") as stderr_file:
+        subprocess.run(scene_change_command, stderr=stderr_file)
+
+        # Step 2: Split the Encode into Chunks
+        scene_changes = [0]
+
+        # Initialize variables to store frame rate and frame number
+        frame_rate = None
+        frame_number = 0
+
+        # Function to check if a line contains 'pts_time' information
+        def has_pts_time(line):
+            return 'pts_time' in line and ':' in line
+
+        with open(scene_change_csv, "r") as csv_file:
+            for line in csv_file:
+                if "Stream #0:" in line and "fps," in line:
+                    # Extract frame rate using regular expression
+                    match = re.search(r"(\d+\.\d+)\s*fps,", line)
+                    if match:
+                        frame_rate = float(match.group(1))
+                elif has_pts_time(line):
+                    parts = line.split("pts_time:")
+                    if len(parts) == 2:
+                        try:
+                            scene_time = float(parts[1].strip())
+                            # Calculate frame number based on pts_time and frame rate
+                            scene_frame = int(scene_time * frame_rate)
+                            scene_changes.append((scene_frame))
+                        except ValueError:
+                            print(f"Error converting to float: {line}")
+
+        # Now scene_changes should contain pairs of (frame_number, pts_time)
+        print("scene_changes:", scene_changes)
+        return scene_changes
+
 parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
-parser.add_argument('--q', nargs='?', default=16, type=int)
+parser.add_argument('--q', nargs='?', default=14, type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=10, type=int)
 parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
+parser.add_argument('--ffmpeg-scd', action="store_true", default=False)
+parser.add_argument('--scdthresh', nargs='?', default=0.35, type=float)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -78,6 +129,8 @@ max_parallel_encodes = args.max_parallel_encodes
 threads = args.threads
 noiselevel = args.noiselevel
 graintable = args.graintable
+ffmpeg_scd = args.ffmpeg_scd
+scdthresh = args.scdthresh
 
 if noiselevel is None:
     noiselevel = 0
@@ -89,11 +142,11 @@ default_params = [
     "--bit-depth=10",
     "--end-usage=q",
     "--aq-mode=0",
+    "--deltaq-mode=1",
     "--enable-chroma-deltaq=1",
     "--tune-content=psy",
     "--tune=ssim",
     "--lag-in-frames=64",
-    "--sb-size=dynamic",
     "--enable-qm=1",
     "--qm-min=0",
     "--qm-max=8",
@@ -120,13 +173,15 @@ presets = {
     "720p": [
         "--color-primaries=bt709",
         "--transfer-characteristics=bt709",
-        "--matrix-coefficients=bt709"
+        "--matrix-coefficients=bt709",
+        "--sb-size=64"
         # Add more parameters as needed
     ],
     "1080p": [
         "--color-primaries=bt709",
         "--transfer-characteristics=bt709",
-        "--matrix-coefficients=bt709"
+        "--matrix-coefficients=bt709",
+        "--sb-size=64"
         # Add more parameters as needed
     ],
     # Add more presets as needed
@@ -157,29 +212,32 @@ os.makedirs(chunks_folder, exist_ok=True)
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
 
-# Find the scene change file recursively
-scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
-scene_change_file_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
+if ffmpeg_scd:
+    scene_changes=ffscd(encode_script)
+else:
+    # Find the scene change file recursively
+    scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
+    scene_change_file_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
 
-if scene_change_file_path is None:
-    print(f"Scene change file not found: {scene_change_filename}")
-    sys.exit(1)
+    if scene_change_file_path is None:
+        print(f"Scene change file not found: {scene_change_filename}")
+        sys.exit(1)
 
-# Read scene changes from the file
-scene_changes = []
+    # Read scene changes from the file
+    scene_changes = []
 
-with open(scene_change_file_path, "r") as scene_change_file:
-    for line in scene_change_file:
-        parts = line.strip().split()
-        if len(parts) == 2:
-            start_frame = int(parts[0])
-            scene_changes.append(start_frame)
+    with open(scene_change_file_path, "r") as scene_change_file:
+        for line in scene_change_file:
+            parts = line.strip().split()
+            if len(parts) == 2:
+                start_frame = int(parts[0])
+                scene_changes.append(start_frame)
 
-# Debug: Print the scene changes from the file
-print("Scene Changes from File:")
-for i, start_frame in enumerate(scene_changes):
-    end_frame = 0 if i == len(scene_changes) - 1 else scene_changes[i + 1] - 1
-    print(f"Scene {i}: Start Frame: {start_frame}, End Frame: {end_frame}")
+    # Debug: Print the scene changes from the file
+    print("Scene Changes from File:")
+    for i, start_frame in enumerate(scene_changes):
+        end_frame = 0 if i == len(scene_changes) - 1 else scene_changes[i + 1] - 1
+        print(f"Scene {i}: Start Frame: {start_frame}, End Frame: {end_frame}")
 
 # Step 2: Encode the Scenes
 encode_commands = []  # List to store the encoding commands
@@ -299,9 +357,11 @@ with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
         completed_chunks.append(output_chunk)
         # print(f"Encoding for scene completed: {output_chunk}")
 
+
 # Wait for all encoding processes to finish before concatenating
 progress_bar.close()
 print("Encoding for all scenes completed.")
+
 
 # Output final video file name
 output_name = os.path.splitext(os.path.basename(encode_script))[0]
