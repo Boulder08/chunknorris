@@ -8,8 +8,11 @@ Set common parameters in default_params and add/edit the presets as needed.
 Set base_working_folder and scene_change_file_path according to your folder structure.
 Set max_parallel_encodes to the maximum number of encodes you want to run simultaneously (tune according to your processor and memory usage!)
 
-Usage: python chunk_norris.py script.avs preset q min_chunk_length, for example:
-python chunk_norris.py greatmovie.avs 720p 16 120
+usage: chunk_norris.py [-h] [--preset [PRESET]] [--q [Q]] [--min-chunk-length [MIN_CHUNK_LENGTH]]
+                       [--max-parallel-encodes [MAX_PARALLEL_ENCODES]] [--threads [THREADS]]
+                       [--noiselevel [NOISELEVEL]] [--graintable [GRAINTABLE]] encode_script
+                       
+For example: python chunk_norris.py --preset 720p --q 14 --max-parallel-encodes 6 --graintable c:\temp\grain.tbl
 
 1. The script creates a folder structure based on the AVS script name under the set base working folder, removing the existing folders with same name first.
    
