@@ -8,22 +8,6 @@
 # Set common parameters in default_params and add/edit the presets as needed.
 # Set base_working_folder and scene_change_file_path according to your folder structure.
 # Set max_parallel_encodes to the maximum number of encodes you want to run simultaneously (tune according to your processor and memory usage!)
-#
-# Usage: python chunk_norris.py script.avs preset q min_chunk_length, for example:
-# python chunk_norris.py greatmovie.avs 720p 16 120
-#
-# 1. The script creates a folder structure based on the AVS script name under the set base working folder, removing the existing folders with same name first.
-#   
-# 2. It searches for the QP file in the specified folder or its subfolders.
-# 
-# 3. The chunks to encode are created based on the QP file. If a chunk (scene) length is less than the specified minimum,
-#    it will combine it with the next one and so on until the minimum length is met. The last scene can be shorter.
-#    The encoder parameters are picked up from the default parameters + selected preset.
-#
-# 4. The encoding queue is ordered from longest to shortest chunk. This ensures that there will not be any single long encodes running at the end.
-#    The last scene is encoded in the first batch of chunks since we don't know its length based on the QP file.
-#   
-# 5. The encoded chunks are concatenated in their original order to a Matroska container using ffmpeg.
 
 import os
 import subprocess
@@ -58,7 +42,7 @@ def ffscd(encode_script):
     scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
     scene_change_command = [
         "ffmpeg",
-        "-i", encode_script,
+        "-i", scd_script,
         "-vf", f"select='gt(scene,{scdthresh})',metadata=print",
         "-an", "-f", "null",
         "-",
@@ -93,13 +77,14 @@ def ffscd(encode_script):
                             scene_time = float(parts[1].strip())
                             # Calculate frame number based on pts_time and frame rate
                             scene_frame = int(scene_time * frame_rate)
-                            scene_changes.append((scene_frame))
+                            scene_changes.append(scene_frame)
                         except ValueError:
                             print(f"Error converting to float: {line}")
 
         # Now scene_changes should contain pairs of (frame_number, pts_time)
         print("scene_changes:", scene_changes)
         return scene_changes
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
@@ -110,8 +95,9 @@ parser.add_argument('--max-parallel-encodes', nargs='?', default=10, type=int)
 parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--ffmpeg-scd', action="store_true", default=False)
-parser.add_argument('--scdthresh', nargs='?', default=0.35, type=float)
+parser.add_argument('--ffmpeg-scd', nargs='?', default=0, type=int)
+parser.add_argument('--scdthresh', nargs='?', default=0.3, type=float)
+parser.add_argument('--downscale-scd', action="store_true")
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -131,6 +117,7 @@ noiselevel = args.noiselevel
 graintable = args.graintable
 ffmpeg_scd = args.ffmpeg_scd
 scdthresh = args.scdthresh
+downscale_scd = args.downscale_scd
 
 if noiselevel is None:
     noiselevel = 0
@@ -212,8 +199,29 @@ os.makedirs(chunks_folder, exist_ok=True)
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
 
-if ffmpeg_scd:
-    scene_changes=ffscd(encode_script)
+# Detect scene changes with ffmpeg?
+if ffmpeg_scd == 1:
+    scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
+    scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
+    if os.path.exists(scd_script) is False:
+        print(f"Scene change analysis script not found: {scd_script}, created manually.")
+        with open(encode_script, 'r') as file:
+            # Read the first line from the original file
+            source = file.readline()
+            with open(scd_script, 'w') as new_file:
+                # Write the first line content to the new file
+                new_file.write(source)
+                if downscale_scd:
+                    new_file.write('\n')
+                    new_file.write('ReduceBy2()')
+        scene_changes = ffscd(scd_script)
+    else:
+        print(f"Using scene change analysis script: {scd_script}.")
+        scene_changes = ffscd(scd_script)
+elif ffmpeg_scd == 2:
+    print(f"Using scene change analysis script: {encode_script}.")
+    scene_changes = ffscd(encode_script)
+# Use the QP file instead
 else:
     # Find the scene change file recursively
     scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
@@ -325,6 +333,7 @@ for i in chunklist:
 #
     encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
 
+
 # Function to execute encoding commands and print them for debugging
 def run_encode_command(command):
     avs2yuv_command, aomenc_command, output_chunk = command
@@ -342,6 +351,7 @@ def run_encode_command(command):
     aomenc_process.communicate()
 
     return output_chunk
+
 
 # Run encoding commands with a set maximum of concurrent processes
 completed_chunks = []
