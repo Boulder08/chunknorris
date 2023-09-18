@@ -1,12 +1,12 @@
 # chunknorris
 A very simple PoC-like Python script to do chunked, parallel encoding using the aomenc CLI encoder.
 
-Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended).
+Requirements: Python 3.10.x (possibly just 3.x), Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended).
+Optionally scene change list in x264/x265 QP file format, if you don't want to use ffmpeg for scene change detection.
 Make sure you have ffmpeg and the encoder in PATH or where you run the script.
 
 Set common parameters in default_params and add/edit the presets as needed.
 Set base_working_folder and scene_change_file_path according to your folder structure.
-Set max_parallel_encodes to the maximum number of encodes you want to run simultaneously (tune according to your processor and memory usage!)
 
 usage: chunk_norris.py [-h] [--preset [PRESET]] [--q [Q]] [--min-chunk-length [MIN_CHUNK_LENGTH]]
                        [--max-parallel-encodes [MAX_PARALLEL_ENCODES]] [--threads [THREADS]]
