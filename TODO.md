@@ -4,5 +4,6 @@
 - Add a possibility to create a simple encoding script that just loads the source, maybe crop + downscale as well.
   
 # Long term development goals
+- Implement a simple GUI
 - Support other encoders like x265
 - Clean the script :D
