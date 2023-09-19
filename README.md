@@ -51,7 +51,7 @@ chunk_norris.py [-h] [--preset [PRESET]] [--q [Q]] [--min-chunk-length [MIN_CHUN
 - Example: --min-chunk-length 100
 - Default: 64 (the same as --lag-in-frames in the default parameters)
 
---max-parallel-encodes: Defines, how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory.
+--max-parallel-encodes: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory.
 - Example: --max-parallel-encodes 8
 - Default: 10
 
