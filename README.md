@@ -16,7 +16,7 @@ A Python script for chunked encoding using the aomenc CLI encoder
 Before using **Chunk Norris**, ensure you have the following dependencies installed and properly configured on your system:
 
 - Python 3.10.x (or a compatible 3.x version)
-- A scene change list in x264/x265 QP file format
+- (A scene change list in x264/x265 QP file format)
 - Avisynth+
 - avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
 - FFmpeg
