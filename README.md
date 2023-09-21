@@ -87,6 +87,10 @@ python chunk_norris.py encode_script [options]
 - Example: --max-parallel-encodes 8
 - Default: 10
 
+**--cpu**: Defines the '--cpu-used' parameter in aomenc. Lower is better, but also slower.
+- Example: --cpu 6
+- Default: 3
+
 **--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead.
 - Example: --threads 4
 - Default: 8
@@ -96,7 +100,7 @@ python chunk_norris.py encode_script [options]
 - Default: 0
 
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
-- --graintable-method 0 skips creation
+- --graintable-method 0 skips creation.
 - --graintable-method 1 creates a table based on two-second long chunks picked evenly throughout the whole video. Use --grain-clip-length to define the amount of chunks.
 - --graintable-method 2 creates a table based on a user set range.
 - The grain table file is placed in the same folder as the encoding script, named "'encoding_script'_grain.tbl". If it already exists, a new one is not created.
