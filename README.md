@@ -21,6 +21,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
 - FFmpeg
 - aomenc (the lavish mod is recommended)
+- grav1synth (in case of --graintable-method 1 or 2)
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
 
