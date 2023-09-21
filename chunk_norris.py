@@ -88,10 +88,11 @@ def ffscd(encode_script):
 parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
+parser.add_argument('--cpu', nargs='?', default=3, type=int)
+parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--q', nargs='?', default=14, type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=10, type=int)
-parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
@@ -121,13 +122,14 @@ grain_clip_length = args.grain_clip_length
 ffmpeg_scd = args.ffmpeg_scd
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
+cpu = args.cpu
 
 if noiselevel is None or graintable or graintable_method > 0:
     noiselevel = 0
 
 # Define default encoding parameters common to each preset as a list
 default_params = [
-    "--cpu-used=3",
+    f"--cpu-used={cpu}",
     f"--threads={threads}",
     "--bit-depth=10",
     "--end-usage=q",
@@ -431,7 +433,7 @@ def run_encode_command(command):
     aomenc_command = " ".join(aomenc_command)
 
     # Print the aomenc encoding command for debugging
-    print(f"\naomenc command: {aomenc_command}")
+    # print(f"\naomenc command: {aomenc_command}")
 
     # Execute avs2yuv and pipe the output to aomenc
     avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
