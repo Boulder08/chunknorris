@@ -38,10 +38,12 @@ Additionally, make sure that all the tools are accessible from your system's PAT
 
 4. The encoding queue is ordered from longest to shortest chunk. This ensures that there will not be any single long encodes running at the end.
    The last scene is encoded in the first batch of chunks since we don't know its length based on the scene changes.
-
-5. You can control the amount of parallel encodes by a CLI parameter. Tune the amount according to your system, both CPU and memory-wise.
    
-6. The encoded chunks are concatenated in their original order to a Matroska container using ffmpeg.
+5. If you have enabled the creation of a grain table or supply it with a separate parameter, it is applied during the encode.
+
+6. You can control the amount of parallel encodes by a CLI parameter. Tune the amount according to your system, both CPU and memory-wise.
+   
+7. The encoded chunks are concatenated in their original order to a Matroska container using ffmpeg.
 
 ---
 
@@ -92,7 +94,19 @@ python chunk_norris.py encode_script [options]
 - Example: --noiselevel 20
 - Default: 0
 
-**--graintable**: Defines a (full) path to a Film Grain Synthesis grain table file, which you can get by using grav1synth.
+**--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
+- --graintable-method 0 skips creation
+- --graintable-method 1 creates a table based on two-second long chunks picked evenly throughout the whole video. Use --grain-clip-length to define the amount of chunks.
+- --graintable-method 2 creates a table based on a user set range.
+- The grain table file is placed in the same folder as the encoding script, named "'encoding_script'_grain.tbl". If it already exists, a new one is not created.
+- Example: --graintable-method 1
+- Default: 1
+
+**--grain-clip-length**: Defines the amount of chunks used for creating the Film Grain Synthesis grain table, when --graintable-method is 1.
+- Example: --grain-clip-length 120
+- Default: 60
+
+**--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth.
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
 
@@ -133,7 +147,7 @@ The final concatenated video file will be named based on the input Avisynth scri
 Here's an example of how to use Chunk Norris:
 
 ```bash
-python chunk_norris.py my_video.avs --preset 1080p --q 18 --max-parallel-encodes 6
+python chunk_norris.py my_video.avs --preset "1080p" --q 18 --max-parallel-encodes 6 --ffmpeg-scd 1 --downscale-scd
 ```
 
 This command will encode the video specified in my_video.avs using the '1080p' preset, a quality level of 18, and a maximum of 6 parallel encoding processes.

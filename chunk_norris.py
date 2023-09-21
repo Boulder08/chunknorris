@@ -57,7 +57,6 @@ def ffscd(encode_script):
 
         # Initialize variables to store frame rate and frame number
         frame_rate = None
-        frame_number = 0
 
         # Function to check if a line contains 'pts_time' information
         def has_pts_time(line):
@@ -94,9 +93,11 @@ parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=10, type=int)
 parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
+parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
+parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
 parser.add_argument('--ffmpeg-scd', nargs='?', default=0, type=int)
-parser.add_argument('--scdthresh', nargs='?', default=0.3, type=float)
+parser.add_argument('--scdthresh', nargs='?', default=0.4, type=float)
 parser.add_argument('--downscale-scd', action="store_true")
 
 # Set the base working folder, use double backslashes
@@ -115,11 +116,13 @@ max_parallel_encodes = args.max_parallel_encodes
 threads = args.threads
 noiselevel = args.noiselevel
 graintable = args.graintable
+graintable_method = args.graintable_method
+grain_clip_length = args.grain_clip_length
 ffmpeg_scd = args.ffmpeg_scd
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 
-if noiselevel is None:
+if noiselevel is None or graintable or graintable_method > 0:
     noiselevel = 0
 
 # Define default encoding parameters common to each preset as a list
@@ -143,7 +146,6 @@ default_params = [
     "--disable-trellis-quant=0",
     "--enable-dnl-denoising=0",
     f"--denoise-noise-level={noiselevel}",
-    f"--film-grain-table={graintable}",
     "--enable-keyframe-filtering=1",
     "--tile-columns=0",
     "--tile-rows=0",
@@ -183,7 +185,7 @@ output_folder_name = os.path.join(base_working_folder, output_folder_name)
 
 # Clean up the target folder if it already exists
 if os.path.exists(output_folder_name):
-    print(f"Cleaning up the existing folder: {output_folder_name}")
+    print(f"\nCleaning up the existing folder: {output_folder_name}\n")
     clean_folder(output_folder_name)
 
 # Create folders for the Avisynth scripts, encoded chunks, and output
@@ -199,27 +201,115 @@ os.makedirs(chunks_folder, exist_ok=True)
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
 
+# Define final video file name
+output_name = os.path.splitext(os.path.basename(encode_script))[0]
+output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
+
+# Generate the FGS analysis file names
+output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.264")
+output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.webm")
+output_grain_table = os.path.split(encode_script)[0]
+output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
+
+# Create the reference files for FGS
+if graintable_method > 0:
+    # Create the grain table only if it doesn't exist already
+    if os.path.exists(output_grain_table) is False:
+        grain_script = os.path.join(scripts_folder, f"grainscript.avs")
+
+        if graintable_method == 1:
+            # Let's just import the encoding script so we'll get a diff for all the nasty things aomenc does
+            with open(grain_script, 'w') as grain_file:
+                grain_file.write(f'Import("{encode_script}")\n')
+                grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
+                grain_file.write('grain_frame_count = FrameCount()\n')
+                grain_file.write(f'step = Ceil(grain_frame_count / ({grain_clip_length} - 1))\n')
+                grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
+        else:
+            referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
+            referencefile_end_frame = input("Please enter the last frame of FGS grain table process: ")
+            # Let's just import the encoding script so we'll get a diff for all the nasty things aomenc does
+            with open(grain_script, 'w') as grain_file:
+                grain_file.write(f'Import("{encode_script}")\n')
+                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
+
+            # Create the encoding command lines
+        avs2yuv_command_grain = [
+        "avs2yuv64.exe",
+        "-no-mt",
+        grain_script,
+        "-",
+    #        "2> nul"
+        ]
+
+        aomenc_command_grain = [
+        "aomenc.exe",
+        *encode_params,
+        "--passes=1",
+        f"--cq-level={q}",
+        "-o", output_grain_file_encoded,
+        "-"
+        ]
+
+        x264_command_grain = [
+        "x264.exe",
+        "--demuxer", "y4m",
+        "--preset", "medium",
+        "--crf", "0",
+        "-o", output_grain_file_lossless,
+        "-"
+        ]
+
+        # Create the command line to compare the original and encoded files to get the grain table
+        grav1synth_command = [
+        "grav1synth.exe",
+        "diff",
+        "-o", output_grain_table,
+        output_grain_file_lossless,
+        output_grain_file_encoded
+        ]
+
+        print("Encoding the FGS analysis AV1 file.\n")
+        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
+        aomenc_grain_process = subprocess.Popen(aomenc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
+        aomenc_grain_process.communicate()
+
+        print("\n\nEncoding the FGS analysis lossless file.\n")
+        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
+        x264_grain_process = subprocess.Popen(x264_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
+        x264_grain_process.communicate()
+
+        print("\nCreating the FGS grain table file.\n")
+        subprocess.run(grav1synth_command)
+
+# Adapt the encoder parameters depending on FGS
+if graintable_method > 0:
+    encode_params.append(f"--film-grain-table={output_grain_table}")
+else:
+    encode_params.append(f"--film-grain-table={graintable}")
+
 # Detect scene changes with ffmpeg?
 if ffmpeg_scd == 1:
     scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
     scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
     if os.path.exists(scd_script) is False:
-        print(f"Scene change analysis script not found: {scd_script}, created manually.")
+        print(f"\nScene change analysis script not found: {scd_script}, created manually.\n")
         with open(encode_script, 'r') as file:
             # Read the first line from the original file
             source = file.readline()
-            with open(scd_script, 'w') as new_file:
+            with open(scd_script, 'w') as scd_file:
                 # Write the first line content to the new file
-                new_file.write(source)
+                scd_file.write(source)
                 if downscale_scd:
-                    new_file.write('\n')
-                    new_file.write('ReduceBy2()')
+                    scd_file.write('\n')
+                    scd_file.write('ReduceBy2()')
+                    scd_file.write('Crop(16,16,-16,-16)')
         scene_changes = ffscd(scd_script)
     else:
-        print(f"Using scene change analysis script: {scd_script}.")
+        print(f"\nUsing scene change analysis script: {scd_script}.\n")
         scene_changes = ffscd(scd_script)
 elif ffmpeg_scd == 2:
-    print(f"Using scene change analysis script: {encode_script}.")
+    print(f"\nUsing scene change analysis script: {encode_script}.\n")
     scene_changes = ffscd(encode_script)
 # Use the QP file instead
 else:
@@ -242,7 +332,7 @@ else:
                 scene_changes.append(start_frame)
 
     # Debug: Print the scene changes from the file
-    print("Scene Changes from File:")
+    print("\nScene Changes from File:")
     for i, start_frame in enumerate(scene_changes):
         end_frame = 0 if i == len(scene_changes) - 1 else scene_changes[i + 1] - 1
         print(f"Scene {i}: Start Frame: {start_frame}, End Frame: {end_frame}")
@@ -341,7 +431,7 @@ def run_encode_command(command):
     aomenc_command = " ".join(aomenc_command)
 
     # Print the aomenc encoding command for debugging
-    # print(f"aomenc command: {aomenc_command}")
+    print(f"\naomenc command: {aomenc_command}")
 
     # Execute avs2yuv and pipe the output to aomenc
     avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
@@ -371,11 +461,6 @@ with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
 # Wait for all encoding processes to finish before concatenating
 progress_bar.close()
 print("Encoding for all scenes completed.")
-
-
-# Output final video file name
-output_name = os.path.splitext(os.path.basename(encode_script))[0]
-output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
 
 # Create a list file for input files
 input_list_txt = os.path.join(chunks_folder, "input_list.txt")
