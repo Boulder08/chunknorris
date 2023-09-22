@@ -304,7 +304,7 @@ if ffmpeg_scd == 1:
                 scd_file.write(source)
                 if downscale_scd:
                     scd_file.write('\n')
-                    scd_file.write('ReduceBy2()')
+                    scd_file.write('ReduceBy2()\n')
                     scd_file.write('Crop(16,16,-16,-16)')
         scene_changes = ffscd(scd_script)
     else:
