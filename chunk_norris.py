@@ -16,6 +16,7 @@ import sys
 import concurrent.futures
 import shutil
 import argparse
+import csv
 from tqdm import tqdm
 
 
@@ -37,9 +38,10 @@ def find_scene_change_file(start_dir, filename):
     return None
 
 
-def ffscd(encode_script):
+# Function to detect scene changes with ffmpeg
+def ffscd(scd_script):
     # Step 1: Detect Scene Changes
-    scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+
     scene_change_command = [
         "ffmpeg",
         "-i", scd_script,
@@ -49,6 +51,7 @@ def ffscd(encode_script):
     ]
 
     # Redirect stderr to the CSV file
+    print ("Detecting scene changes using ffmpeg.\n")
     with open(scene_change_csv, "w") as stderr_file:
         subprocess.run(scene_change_command, stderr=stderr_file)
 
@@ -58,9 +61,11 @@ def ffscd(encode_script):
         # Initialize variables to store frame rate and frame number
         frame_rate = None
 
+
         # Function to check if a line contains 'pts_time' information
         def has_pts_time(line):
             return 'pts_time' in line and ':' in line
+
 
         with open(scene_change_csv, "r") as csv_file:
             for line in csv_file:
@@ -80,9 +85,296 @@ def ffscd(encode_script):
                         except ValueError:
                             print(f"Error converting to float: {line}")
 
-        # Now scene_changes should contain pairs of (frame_number, pts_time)
-        print("scene_changes:", scene_changes)
+        # print("scene_changes:", scene_changes)
         return scene_changes
+
+
+# Function to detect scene changes with PySceneDetect
+def pyscd(scd_script):
+    scene_change_command = [
+        "scenedetect.exe",
+        "-i", scd_script,
+        "-b", "moviepy",
+        "-o", output_folder_name,
+        "detect-adaptive",
+        "-t", f"{scdthresh}",
+        "-m", f"{min_chunk_length}",
+        "list-scenes",
+        "-f", scene_change_csv
+    ]
+    print("Detecting scene changes using PySceneDetect.\n")
+    subprocess.run(scene_change_command)
+
+
+def create_FGS_table():
+    # Create the grain table only if it doesn't exist already
+    if os.path.exists(output_grain_table) is False:
+        grain_script = os.path.join(scripts_folder, f"grainscript.avs")
+
+        if graintable_method == 1:
+            with open(grain_script, 'w') as grain_file:
+                grain_file.write(f'Import("{encode_script}")\n')
+                grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
+                grain_file.write('grain_frame_count = FrameCount()\n')
+                grain_file.write(f'step = Ceil(grain_frame_count / ({grain_clip_length} - 1))\n')
+                grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
+        else:
+            referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
+            referencefile_end_frame = input("Please enter the last frame of FGS grain table process: ")
+            with open(grain_script, 'w') as grain_file:
+                grain_file.write(f'Import("{encode_script}")\n')
+                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
+
+        # Create the encoding command lines
+        avs2yuv_command_grain = [
+            "avs2yuv64.exe",
+            "-no-mt",
+            grain_script,
+            "-",
+            #        "2> nul"
+        ]
+
+        aomenc_command_grain = [
+            "aomenc.exe",
+            *encode_params,
+            "--passes=1",
+            f"--cq-level={q}",
+            "-o", output_grain_file_encoded,
+            "-"
+        ]
+
+        x264_command_grain = [
+            "x264.exe",
+            "--demuxer", "y4m",
+            "--preset", "slow",
+            "--crf", "0",
+            "-o", output_grain_file_lossless,
+            "-"
+        ]
+
+        # Create the command line to compare the original and encoded files to get the grain table
+        grav1synth_command = [
+            "grav1synth.exe",
+            "diff",
+            "-o", output_grain_table,
+            output_grain_file_lossless,
+            output_grain_file_encoded
+        ]
+
+        print("Encoding the FGS analysis AV1 file.\n")
+        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
+        aomenc_grain_process = subprocess.Popen(aomenc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
+        aomenc_grain_process.communicate()
+
+        print("\n\nEncoding the FGS analysis lossless file.\n")
+        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
+        x264_grain_process = subprocess.Popen(x264_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
+        x264_grain_process.communicate()
+
+        print("\nCreating the FGS grain table file.\n")
+        subprocess.run(grav1synth_command)
+    else:
+        print("The FGS grain table file exists already, skipping creation.\n")
+
+def scene_change_detection(scd_script):
+    # Detect scene changes or use QP-file
+    if scd_method == 0:
+        # Find the scene change file recursively
+        scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
+        scene_change_file_path = os.path.dirname(encode_script)
+        scene_change_file_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
+
+        if scene_change_file_path is None:
+            print(f"Scene change file not found: {scene_change_filename}")
+            sys.exit(1)
+
+        # Read scene changes from the file
+        scene_changes = []
+
+        with open(scene_change_file_path, "r") as scene_change_file:
+            for line in scene_change_file:
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    start_frame = int(parts[0])
+                    scene_changes.append(start_frame)
+        print("Read scene changes from QP file.\n")
+
+        # Debug: Print the scene changes from the file
+        # print("\nScene Changes from File:")
+        # for i, start_frame in enumerate(scene_changes):
+            # end_frame = 0 if i == len(scene_changes) - 1 else scene_changes[i + 1] - 1
+            # print(f"Scene {i}: Start Frame: {start_frame}, End Frame: {end_frame}")
+
+    elif scd_method == 1:
+        if os.path.exists(scd_script) is False:
+            print(f"Scene change analysis script not found: {scd_script}, created manually.\n")
+            with open(encode_script, 'r') as file:
+                # Read the first line from the original file
+                source = file.readline()
+                with open(scd_script, 'w') as scd_file:
+                    # Write the first line content to the new file
+                    scd_file.write(source)
+                    if downscale_scd:
+                        scd_file.write('\n')
+                        scd_file.write('ReduceBy2()\n')
+                        scd_file.write('Crop(16,16,-16,-16)')
+            scene_changes = ffscd(scd_script)
+        else:
+            print(f"Using scene change analysis script: {scd_script}.\n")
+            scene_changes = ffscd(scd_script)
+    elif scd_method == 2:
+        print(f"Using scene change analysis script: {encode_script}.\n")
+        scd_script = encode_script
+        scene_changes = ffscd(scd_script)
+    elif scd_method == 3:
+        scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
+        scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
+        if os.path.exists(scd_script) is False:
+            print(f"Scene change analysis script not found: {scd_script}, created manually.\n")
+            with open(encode_script, 'r') as file:
+                # Read the first line from the original file
+                source = file.readline()
+                with open(scd_script, 'w') as scd_file:
+                    # Write the first line content to the new file
+                    scd_file.write(source)
+                    scd_file.write('Crop(16,16,-16,-16)')
+            scene_changes = pyscd(scd_script)
+        else:
+            print(f"Using scene change analysis script: {scd_script}.\n")
+            scene_changes = pyscd(scd_script)
+    else:
+        print(f"Using scene change analysis script: {encode_script}.\n")
+        scene_changes = pyscd(encode_script)
+    return scene_changes
+
+
+def preprocess_chunks(encode_commands, input_files, chunklist):
+    if scd_method in (0, 1, 2):
+        chunk_number = 1
+        i = 0
+        combined = False
+        while i < len(scene_changes):
+            start_frame = scene_changes[i]
+            if i < len(scene_changes) - 1:
+                end_frame = scene_changes[i + 1] - 1
+            else:
+                end_frame = 0
+            # print(i,start_frame,end_frame)
+
+            # Check if the current scene is too short
+            if end_frame - start_frame + 1 < min_chunk_length:
+                next_scene_index = i + 2
+                combined = True
+
+                # Combine scenes until the chunk length is at least min_chunk_length
+                while next_scene_index < len(scene_changes):
+                    end_frame = scene_changes[next_scene_index] - 1
+                    chunk_length = end_frame - start_frame + 1
+
+                    if chunk_length >= min_chunk_length:
+                        break  # The combined chunk is long enough
+                    else:
+                        next_scene_index += 1  # Move to the next scene
+
+                if next_scene_index == len(scene_changes):
+                    # No more scenes left to combine
+                    end_frame = 0  # Set end_frame to 0 for the last scene
+                # print(f'Next scene index: {next_scene_index}')
+            chunk_length = end_frame - start_frame + 1
+            chunk_length = 999999 if chunk_length < 0 else chunk_length
+
+            chunkdata = {
+                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
+            }
+            chunklist.append(chunkdata)
+
+            chunk_number += 1
+
+            if combined:
+                i = next_scene_index
+                combined = False
+            else:
+                i += 1
+    else:
+        with open(scene_change_csv, 'r') as pyscd_file:
+            scenelist = csv.reader(pyscd_file)
+            scenelist = list(scenelist)
+
+            found_start = False  # Flag to indicate when a line starting with a number is found
+
+        # Process each line in the CSV file
+        for row in scenelist:
+            if not found_start:
+                if row and row[0].isdigit():
+                    found_start = True  # Start processing lines
+                else:
+                    continue  # Skip lines until a line starting with a number is found
+
+            if len(row) >= 5:
+                chunk_number = int(row[0]) # First column
+                start_frame = int(row[1]) - 1  # Second column
+                end_frame = int(row[4]) - 1  # Fifth column
+                chunk_length = int(row[7]) # Eighth column
+            chunkdata = {
+                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
+            }
+            chunklist.append(chunkdata)
+
+#    print (chunklist)
+
+    for i in chunklist:
+        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
+        input_files.append(output_chunk)  # Add the input file for concatenation
+
+    chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
+
+    for i in chunklist:
+        scene_script_file = os.path.join(scripts_folder, f"scene_{i['chunk']}.avs")
+        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
+        # Create the Avisynth script for this scene
+        with open(scene_script_file, "w") as scene_script:
+            scene_script.write(f'Import("{encode_script}")\n')
+            scene_script.write(f"Trim({i['start']}, {i['end']})")
+
+        avs2yuv_command = [
+            "avs2yuv64.exe",
+            "-no-mt",
+            scene_script_file,  # Use the Avisynth script for this scene
+            "-",
+            "2> nul"
+        ]
+
+        aomenc_command = [
+            "aomenc.exe",
+            "-q",
+            *encode_params,
+            "--passes=1",
+            f"--cq-level={q}",
+            "-o", output_chunk,
+            "-"
+        ]
+
+        encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
+    return encode_commands, input_files, chunklist
+
+
+# Function to execute encoding commands and print them for debugging
+def run_encode_command(command):
+    avs2yuv_command, aomenc_command, output_chunk = command
+    avs2yuv_command = " ".join(avs2yuv_command)
+    aomenc_command = " ".join(aomenc_command)
+
+    # Print the aomenc encoding command for debugging
+    # print(f"\naomenc command: {aomenc_command}")
+
+    # Execute avs2yuv and pipe the output to aomenc
+    avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
+    aomenc_process = subprocess.Popen(aomenc_command, stdin=avs2yuv_process.stdout, shell=True)
+
+    # Wait for aomenc to finish
+    aomenc_process.communicate()
+
+    return output_chunk
 
 
 parser = argparse.ArgumentParser()
@@ -92,13 +384,13 @@ parser.add_argument('--cpu', nargs='?', default=3, type=int)
 parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--q', nargs='?', default=14, type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
-parser.add_argument('--max-parallel-encodes', nargs='?', default=10, type=int)
+parser.add_argument('--max-parallel-encodes', nargs='?', default=6, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--ffmpeg-scd', nargs='?', default=0, type=int)
-parser.add_argument('--scdthresh', nargs='?', default=0.4, type=float)
+parser.add_argument('--scd-method', nargs='?', default=0, type=int)
+parser.add_argument('--scdthresh', nargs='?', type=float)
 parser.add_argument('--downscale-scd', action="store_true")
 
 # Set the base working folder, use double backslashes
@@ -119,13 +411,19 @@ noiselevel = args.noiselevel
 graintable = args.graintable
 graintable_method = args.graintable_method
 grain_clip_length = args.grain_clip_length
-ffmpeg_scd = args.ffmpeg_scd
+scd_method = args.scd_method
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
 
+# Set some more default values
 if noiselevel is None or graintable or graintable_method > 0:
     noiselevel = 0
+if scdthresh is None:
+    if scd_method in (1,2):
+        scdthresh = 0.3
+    else:
+        scdthresh = 2.0
 
 # Define default encoding parameters common to each preset as a list
 default_params = [
@@ -215,235 +513,22 @@ output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl"
 
 # Create the reference files for FGS
 if graintable_method > 0:
-    # Create the grain table only if it doesn't exist already
-    if os.path.exists(output_grain_table) is False:
-        grain_script = os.path.join(scripts_folder, f"grainscript.avs")
-
-        if graintable_method == 1:
-            # Let's just import the encoding script so we'll get a diff for all the nasty things aomenc does
-            with open(grain_script, 'w') as grain_file:
-                grain_file.write(f'Import("{encode_script}")\n')
-                grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
-                grain_file.write('grain_frame_count = FrameCount()\n')
-                grain_file.write(f'step = Ceil(grain_frame_count / ({grain_clip_length} - 1))\n')
-                grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
-        else:
-            referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
-            referencefile_end_frame = input("Please enter the last frame of FGS grain table process: ")
-            # Let's just import the encoding script so we'll get a diff for all the nasty things aomenc does
-            with open(grain_script, 'w') as grain_file:
-                grain_file.write(f'Import("{encode_script}")\n')
-                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
-
-            # Create the encoding command lines
-        avs2yuv_command_grain = [
-        "avs2yuv64.exe",
-        "-no-mt",
-        grain_script,
-        "-",
-    #        "2> nul"
-        ]
-
-        aomenc_command_grain = [
-        "aomenc.exe",
-        *encode_params,
-        "--passes=1",
-        f"--cq-level={q}",
-        "-o", output_grain_file_encoded,
-        "-"
-        ]
-
-        x264_command_grain = [
-        "x264.exe",
-        "--demuxer", "y4m",
-        "--preset", "medium",
-        "--crf", "0",
-        "-o", output_grain_file_lossless,
-        "-"
-        ]
-
-        # Create the command line to compare the original and encoded files to get the grain table
-        grav1synth_command = [
-        "grav1synth.exe",
-        "diff",
-        "-o", output_grain_table,
-        output_grain_file_lossless,
-        output_grain_file_encoded
-        ]
-
-        print("Encoding the FGS analysis AV1 file.\n")
-        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
-        aomenc_grain_process = subprocess.Popen(aomenc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
-        aomenc_grain_process.communicate()
-
-        print("\n\nEncoding the FGS analysis lossless file.\n")
-        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
-        x264_grain_process = subprocess.Popen(x264_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
-        x264_grain_process.communicate()
-
-        print("\nCreating the FGS grain table file.\n")
-        subprocess.run(grav1synth_command)
-
-# Adapt the encoder parameters depending on FGS
-if graintable_method > 0:
+    create_FGS_table()
     encode_params.append(f"--film-grain-table={output_grain_table}")
 else:
     encode_params.append(f"--film-grain-table={graintable}")
 
-# Detect scene changes with ffmpeg?
-if ffmpeg_scd == 1:
-    scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
-    scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
-    if os.path.exists(scd_script) is False:
-        print(f"\nScene change analysis script not found: {scd_script}, created manually.\n")
-        with open(encode_script, 'r') as file:
-            # Read the first line from the original file
-            source = file.readline()
-            with open(scd_script, 'w') as scd_file:
-                # Write the first line content to the new file
-                scd_file.write(source)
-                if downscale_scd:
-                    scd_file.write('\n')
-                    scd_file.write('ReduceBy2()')
-                    scd_file.write('Crop(16,16,-16,-16)')
-        scene_changes = ffscd(scd_script)
-    else:
-        print(f"\nUsing scene change analysis script: {scd_script}.\n")
-        scene_changes = ffscd(scd_script)
-elif ffmpeg_scd == 2:
-    print(f"\nUsing scene change analysis script: {encode_script}.\n")
-    scene_changes = ffscd(encode_script)
-# Use the QP file instead
-else:
-    # Find the scene change file recursively
-    scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
-    scene_change_file_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
+# Detect scene changes
+scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
+scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
+scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+scene_changes = scene_change_detection(scd_script)
 
-    if scene_change_file_path is None:
-        print(f"Scene change file not found: {scene_change_filename}")
-        sys.exit(1)
-
-    # Read scene changes from the file
-    scene_changes = []
-
-    with open(scene_change_file_path, "r") as scene_change_file:
-        for line in scene_change_file:
-            parts = line.strip().split()
-            if len(parts) == 2:
-                start_frame = int(parts[0])
-                scene_changes.append(start_frame)
-
-    # Debug: Print the scene changes from the file
-    print("\nScene Changes from File:")
-    for i, start_frame in enumerate(scene_changes):
-        end_frame = 0 if i == len(scene_changes) - 1 else scene_changes[i + 1] - 1
-        print(f"Scene {i}: Start Frame: {start_frame}, End Frame: {end_frame}")
-
-# Step 2: Encode the Scenes
+# Create the AVS scripts, prepare encoding and concatenation commands for chunks
 encode_commands = []  # List to store the encoding commands
 input_files = []  # List to store input files for concatenation
 chunklist = []  # Helper list for producing the encoding and concatenation lists
-
-i = 0
-combined = False
-chunk_number = 1
-
-while i < len(scene_changes):
-    start_frame = scene_changes[i]
-    if i < len(scene_changes) - 1:
-        end_frame = scene_changes[i + 1] - 1
-    else:
-        end_frame = 0
-    # print(i,start_frame,end_frame)
-
-    # Check if the current scene is too short
-    if end_frame - start_frame + 1 < min_chunk_length:
-        next_scene_index = i + 2
-        combined = True
-
-        # Combine scenes until the chunk length is at least min_chunk_length
-        while next_scene_index < len(scene_changes):
-            end_frame = scene_changes[next_scene_index] - 1
-            chunk_length = end_frame - start_frame + 1
-
-            if chunk_length >= min_chunk_length:
-                break  # The combined chunk is long enough
-            else:
-                next_scene_index += 1  # Move to the next scene
-
-        if next_scene_index == len(scene_changes):
-            # No more scenes left to combine
-            end_frame = 0  # Set end_frame to 0 for the last scene
-        # print(f'Next scene index: {next_scene_index}')
-
-    if combined:
-        i = next_scene_index
-        combined = False
-    else:
-        i += 1
-
-    chunk_length = end_frame - start_frame + 1
-    chunk_length = 999999 if chunk_length < 0 else chunk_length
-    chunkdata = {
-            'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
-        }
-    chunklist.append(chunkdata)
-
-    chunk_number += 1
-
-for i in chunklist:
-    output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
-    input_files.append(output_chunk)  # Add the input file for concatenation
-
-chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
-
-for i in chunklist:
-    scene_script_file = os.path.join(scripts_folder, f"scene_{i['chunk']}.avs")
-    output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
-# Create the Avisynth script for this scene
-    with open(scene_script_file, "w") as scene_script:
-        scene_script.write(f'Import("{encode_script}")\n')
-        scene_script.write(f"Trim({i['start']}, {i['end']})")
-
-    avs2yuv_command = [
-    "avs2yuv64.exe",
-    "-no-mt",
-    scene_script_file,  # Use the Avisynth script for this scene
-    "-",
-    "2> nul"
-    ]
-
-    aomenc_command = [
-    "aomenc.exe",
-    "-q",
-    *encode_params,
-    "--passes=1",
-    f"--cq-level={q}",
-    "-o", output_chunk,
-    "-"
-    ]
-#
-    encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
-
-
-# Function to execute encoding commands and print them for debugging
-def run_encode_command(command):
-    avs2yuv_command, aomenc_command, output_chunk = command
-    avs2yuv_command = " ".join(avs2yuv_command)
-    aomenc_command = " ".join(aomenc_command)
-
-    # Print the aomenc encoding command for debugging
-    # print(f"\naomenc command: {aomenc_command}")
-
-    # Execute avs2yuv and pipe the output to aomenc
-    avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
-    aomenc_process = subprocess.Popen(aomenc_command, stdin=avs2yuv_process.stdout, shell=True)
-
-    # Wait for aomenc to finish
-    aomenc_process.communicate()
-
-    return output_chunk
-
+encode_commands, input_files, chunklist = preprocess_chunks(encode_commands, input_files, chunklist)
 
 # Run encoding commands with a set maximum of concurrent processes
 completed_chunks = []
@@ -475,6 +560,7 @@ with open(input_list_txt, "w") as file:
 # Define the ffmpeg concatenation command
 ffmpeg_concat_command = [
     "ffmpeg",
+    "-loglevel", "warning",
     "-f", "concat",
     "-safe", "0",  # Allow absolute paths
     "-i", input_list_txt,

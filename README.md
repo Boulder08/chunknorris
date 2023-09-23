@@ -20,6 +20,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - Avisynth+
 - avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
 - FFmpeg
+- PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows in PySceneDetect.**
 - aomenc (the lavish mod is recommended)
 - grav1synth (in case of --graintable-method 1 or 2)
 
@@ -85,7 +86,7 @@ python chunk_norris.py encode_script [options]
 
 **--max-parallel-encodes**: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory.
 - Example: --max-parallel-encodes 8
-- Default: 10
+- Default: 6
 
 **--cpu**: Defines the '--cpu-used' parameter in aomenc. Lower is better, but also slower.
 - Example: --cpu 6
@@ -115,19 +116,21 @@ python chunk_norris.py encode_script [options]
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
 
-**--ffmpeg-scd**: Defines the method for scene change detection.
-- --ffmpeg-scd 0 uses a QP file style list of scene changes. It attempts to find the file from the path where the encoding script is, searching also in subfolders if needed.
-- --ffmpeg-scd 1 uses ffmpeg for detection, and uses a separate Avisynth script. If it finds one from the encoding script path with the same name as the encoding script with '_scd' added at the end, it uses that.
+**--scd-method**: Defines the method for scene change detection.
+- --scd-method 0 uses a QP file style list (with only keyframes) of scene changes. It attempts to find the file from the path where the encoding script is, searching also in subfolders if needed.
+- --scd-method 1 uses ffmpeg for detection, and uses a separate Avisynth script. If it finds one from the encoding script path with the same name as the encoding script with '_scd' added at the end, it uses that.
   Otherwise a new file will be created based on the encoding script, loading only the source. Please make sure the source is loaded in the first line of the encoding script!
-- --ffmpeg-scd 2 uses ffmpeg for detection, and uses the encoding script to do it.
-- Example: --ffmpeg-scd 1
+- --scd-method 2 uses ffmpeg for detection, and uses the encoding script to do it.
+- --scd-method 3 uses PySceneDetect for detection and a separate script like in method 1.
+- --scd-method 4 uses PySceneDetect for detection and the encoding script like in method 2.
+- Example: --scd-method 1
 - Default: 0
 
 **--scdthresh**: Defines the threshold for scene change detection in ffmpeg. Lower values mean more scene changes detected, but also more false detections.
 - Example: --ffmpeg-scd 0.4
-- Default: 0.3
+- Default: 0.3 for --scd-method 1 and 2, 2.0 for --scd-method 3 and 4
 
-**--downscale-scd**: Set this parameter to enable downscaling using ReduceBy2() in the scene change detection script (if --ffmpeg-scd is 1).
+**--downscale-scd**: Set this parameter to enable downscaling using ReduceBy2() in the scene change detection script (if --scd-method is 1).
 - Example: --downscale-scd
 - Default: None
 
@@ -152,7 +155,7 @@ The final concatenated video file will be named based on the input Avisynth scri
 Here's an example of how to use Chunk Norris:
 
 ```bash
-python chunk_norris.py my_video.avs --preset "1080p" --q 18 --max-parallel-encodes 6 --ffmpeg-scd 1 --downscale-scd
+python chunk_norris.py my_video.avs --preset "720p" --q 18 --max-parallel-encodes 4 --scd-method 3
 ```
 
-This command will encode the video specified in my_video.avs using the '1080p' preset, a quality level of 18, and a maximum of 6 parallel encoding processes.
+This command will encode the video specified in my_video.avs using the '720p' preset, a quality level of 18, and a maximum of 4 parallel encoding processes. It uses PySceneDetect for scene change detection.
