@@ -1,6 +1,4 @@
 # Short term development goals
-- Improve the ffmpeg scene change detection method, or implement a new one
-- Add a semi-automatic method for applying a film grain table based on the original source
 - Add a possibility to create a simple encoding script that just loads the source, maybe crop + downscale as well
 - Move presets, folder setup to a separate .ini file to allow easier updating and customization of the script
   
