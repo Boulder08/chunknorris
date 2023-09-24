@@ -17,7 +17,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 
 - Python 3.10.x (or a compatible 3.x version)
 - (A scene change list in x264/x265 QP file format)
-- Avisynth+
+- Avisynth+ (+ the SCXviD plugin if scdmethod 5 or 6)
 - avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
 - FFmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows in PySceneDetect.**
@@ -32,7 +32,7 @@ Additionally, make sure that all the tools are accessible from your system's PAT
 
 1. The script creates a folder structure based on the AVS script name under the set base working folder, removing the existing folders with same name first.
    
-2. It searches for the QP file in the specified folder or its subfolders, or if --ffmpeg-scd is set, uses ffmpeg to scan for scene changes.
+2. It searches for the QP file in the specified folder or its subfolders, or uses the various scene change detection methods set by --scd-method.
  
 3. The chunks to encode are created based on the scene changes. If a chunk (scene) length is less than the specified minimum,
    it will combine it with the next one and so on until the minimum length is met. The last scene can be shorter.
@@ -100,6 +100,14 @@ python chunk_norris.py encode_script [options]
 - Example: --noiselevel 20
 - Default: 0
 
+**--sharpness**: Defines the '--sharpness' parameter in aomenc. It is a psy RD setting more than a sharpener, lower values allocate more bits to flat areas, blurring sharper ones and vice versa.
+- Example: --sharpness 3
+- Default: 2
+
+**--tile-columns** and **--tile-rows**: Define the corresponding parameters in aomenc.
+- Example: --tile-columns 1 --tile-rows 1
+- Default: None for both
+
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
 - --graintable-method 0 skips creation.
 - --graintable-method 1 creates a table based on two-second long chunks picked evenly throughout the whole video. Use --grain-clip-length to define the amount of chunks.
@@ -123,8 +131,10 @@ python chunk_norris.py encode_script [options]
 - --scd-method 2 uses ffmpeg for detection, and uses the encoding script to do it.
 - --scd-method 3 uses PySceneDetect for detection and a separate script like in method 1.
 - --scd-method 4 uses PySceneDetect for detection and the encoding script like in method 2.
-- Example: --scd-method 1
-- Default: 0
+- --scd-method 5 uses SCXviD for detection and a separate script like in method 1.
+- --scd-method 6 uses SCXviD for detection and the encoding script like in method 2.
+- Example: --scd-method 5
+- Default: 1
 
 **--scdthresh**: Defines the threshold for scene change detection in ffmpeg. Lower values mean more scene changes detected, but also more false detections.
 - Example: --ffmpeg-scd 0.4

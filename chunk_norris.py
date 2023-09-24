@@ -30,6 +30,65 @@ def clean_folder(folder):
             shutil.rmtree(item_path)
 
 
+def create_scxvid_file(scene_change_csv):
+    if scd_method == 5:
+        with open(encode_script, 'r') as file:
+            # Read the first line from the original file
+            source = file.readline()
+        with open(scd_script, 'w') as scd_file:
+            # Write the first line content to the new file
+            scd_file.write(source)
+            if downscale_scd:
+                scd_file.write('\n')
+                scd_file.write('ReduceBy2()\n')
+                scd_file.write('Crop(16,16,-16,-16)\n')
+            scd_file.write(f'SCXvid(log="{scene_change_csv}")')
+    else:
+        with open(scd_script, 'w') as scd_file:
+            scd_file.write(f'Import("{encode_script}")\n')
+            scd_file.write(f'SCXvid(log="{scene_change_csv}")')
+
+    scene_change_command = [
+        "ffmpeg",
+        "-i", scd_script,
+        "-loglevel", "warning",
+        "-an", "-f", "null", "NUL"
+    ]
+
+    print("Detecting scene changes using SCXviD.\n")
+    subprocess.run(scene_change_command)
+
+    print("Converting logfile to QP file format.\n")
+
+    # Read the input file
+    with open(scene_change_csv, "r") as file:
+        scdxvid_data = file.readlines()
+
+    # Initialize variables
+    output_lines = []
+    current_line_number = -3  # The actual data starts from line 4, so this ensures the first scene change has frame number 0.
+
+    # Iterate through the lines
+    for line in scdxvid_data:
+        # Split the line into tokens
+        tokens = line.strip().split()
+
+        # Check if the line starts with 'i'
+        if tokens and tokens[0] == 'i':
+            # Append the current line number and 'I' to the output
+            output_lines.append(f"{current_line_number} I")
+        current_line_number += 1
+
+    # Join the output lines
+    scenechangelist = '\n'.join(output_lines)
+
+    # Write the output to a new file or print it
+    qpfile = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
+    qpfile = os.path.join(scene_change_file_path, qpfile)
+    with open(qpfile, "w") as file:
+        file.write(scenechangelist)
+
+
 # Function to find the scene change file recursively
 def find_scene_change_file(start_dir, filename):
     for root, dirs, files in os.walk(start_dir):
@@ -51,7 +110,7 @@ def ffscd(scd_script):
     ]
 
     # Redirect stderr to the CSV file
-    print ("Detecting scene changes using ffmpeg.\n")
+    print("Detecting scene changes using ffmpeg.\n")
     with open(scene_change_csv, "w") as stderr_file:
         subprocess.run(scene_change_command, stderr=stderr_file)
 
@@ -61,11 +120,9 @@ def ffscd(scd_script):
         # Initialize variables to store frame rate and frame number
         frame_rate = None
 
-
         # Function to check if a line contains 'pts_time' information
         def has_pts_time(line):
             return 'pts_time' in line and ':' in line
-
 
         with open(scene_change_csv, "r") as csv_file:
             for line in csv_file:
@@ -106,7 +163,7 @@ def pyscd(scd_script):
     subprocess.run(scene_change_command)
 
 
-def create_FGS_table():
+def create_fgs_table():
     # Create the grain table only if it doesn't exist already
     if os.path.exists(output_grain_table) is False:
         grain_script = os.path.join(scripts_folder, f"grainscript.avs")
@@ -120,10 +177,15 @@ def create_FGS_table():
                 grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
         else:
             referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
-            referencefile_end_frame = input("Please enter the last frame of FGS grain table process: ")
+            referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 60 seconds of frames if empty): ")
             with open(grain_script, 'w') as grain_file:
                 grain_file.write(f'Import("{encode_script}")\n')
-                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
+                if referencefile_end_frame != '':
+                    grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
+                else:
+                    grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
+                    grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 60)\n')
+                    grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)')
 
         # Create the encoding command lines
         avs2yuv_command_grain = [
@@ -176,9 +238,11 @@ def create_FGS_table():
     else:
         print("The FGS grain table file exists already, skipping creation.\n")
 
+
 def scene_change_detection(scd_script):
+    scene_changes = []
     # Detect scene changes or use QP-file
-    if scd_method == 0:
+    if scd_method in (0, 5, 6):
         # Find the scene change file recursively
         scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
         scene_change_file_path = os.path.dirname(encode_script)
@@ -189,8 +253,6 @@ def scene_change_detection(scd_script):
             sys.exit(1)
 
         # Read scene changes from the file
-        scene_changes = []
-
         with open(scene_change_file_path, "r") as scene_change_file:
             for line in scene_change_file:
                 parts = line.strip().split()
@@ -238,18 +300,19 @@ def scene_change_detection(scd_script):
                     # Write the first line content to the new file
                     scd_file.write(source)
                     scd_file.write('Crop(16,16,-16,-16)')
-            scene_changes = pyscd(scd_script)
+            pyscd(scd_script)
         else:
             print(f"Using scene change analysis script: {scd_script}.\n")
-            scene_changes = pyscd(scd_script)
+            pyscd(scd_script)
     else:
         print(f"Using scene change analysis script: {encode_script}.\n")
-        scene_changes = pyscd(encode_script)
+        pyscd(encode_script)
+
     return scene_changes
 
 
 def preprocess_chunks(encode_commands, input_files, chunklist):
-    if scd_method in (0, 1, 2):
+    if scd_method in (0, 1, 2, 5, 6):
         chunk_number = 1
         i = 0
         combined = False
@@ -311,10 +374,10 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     continue  # Skip lines until a line starting with a number is found
 
             if len(row) >= 5:
-                chunk_number = int(row[0]) # First column
+                chunk_number = int(row[0])  # First column
                 start_frame = int(row[1]) - 1  # Second column
                 end_frame = int(row[4]) - 1  # Fifth column
-                chunk_length = int(row[7]) # Eighth column
+                chunk_length = int(row[7])  # Eighth column
             chunkdata = {
                 'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
             }
@@ -386,10 +449,13 @@ parser.add_argument('--q', nargs='?', default=14, type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=6, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
+parser.add_argument('--sharpness', nargs='?', default=2, type=int)
+parser.add_argument('--tile-columns', nargs='?', type=int)
+parser.add_argument('--tile-rows', nargs='?', type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--scd-method', nargs='?', default=0, type=int)
+parser.add_argument('--scd-method', nargs='?', default=1, type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
 parser.add_argument('--downscale-scd', action="store_true")
 
@@ -408,6 +474,9 @@ min_chunk_length = args.min_chunk_length
 max_parallel_encodes = args.max_parallel_encodes
 threads = args.threads
 noiselevel = args.noiselevel
+sharpness = args.sharpness
+tile_columns = args.tile_columns
+tile_rows = args.tile_rows
 graintable = args.graintable
 graintable_method = args.graintable_method
 grain_clip_length = args.grain_clip_length
@@ -416,68 +485,105 @@ scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
 
-# Set some more default values
+# Set some more case dependent default values
 if noiselevel is None or graintable or graintable_method > 0:
     noiselevel = 0
 if scdthresh is None:
-    if scd_method in (1,2):
+    if scd_method in (1, 2):
         scdthresh = 0.3
     else:
         scdthresh = 2.0
 
-# Define default encoding parameters common to each preset as a list
-default_params = [
-    f"--cpu-used={cpu}",
-    f"--threads={threads}",
-    "--bit-depth=10",
-    "--end-usage=q",
-    "--aq-mode=0",
-    "--deltaq-mode=1",
-    "--enable-chroma-deltaq=1",
-    "--tune-content=psy",
-    "--tune=ssim",
-    "--lag-in-frames=64",
-    "--enable-qm=1",
-    "--qm-min=0",
-    "--qm-max=8",
-    "--row-mt=1",
-    "--kf-min-dist=5",
-    "--kf-max-dist=480",
-    "--disable-trellis-quant=0",
-    "--enable-dnl-denoising=0",
-    f"--denoise-noise-level={noiselevel}",
-    "--enable-keyframe-filtering=1",
-    "--tile-columns=0",
-    "--tile-rows=0",
-    "--sharpness=2",
-    "--enable-cdef=0",
-    "--enable-fwd-kf=1",
-    "--arnr-strength=0",
-    "--arnr-maxframes=5",
-    "--quant-b-adapt=1"
-]
+default_values = {
+    "cpu-used": cpu,
+    "threads": threads,
+    "bit-depth": 10,
+    "end-usage": "q",
+    "aq-mode": 0,
+    "deltaq-mode": 1,
+    "enable-chroma-deltaq": 1,
+    "tune-content": "psy",
+    "tune": "ssim",
+    "lag-in-frames": 64,
+    "enable-qm": 1,
+    "qm-min": 0,
+    "qm-max": 8,
+    "sb-size": 64,
+    "row-mt": 1,
+    "kf-min-dist": 5,
+    "kf-max-dist": 480,
+    "disable-trellis-quant": 0,
+    "enable-dnl-denoising": 0,
+    "denoise-noise-level": noiselevel,
+    "enable-keyframe-filtering": 1,
+    "tile-columns": tile_columns,
+    "tile-rows": tile_rows,
+    "sharpness": sharpness,
+    "enable-cdef": 0,
+    "enable-fwd-kf": 1,
+    "arnr-strength": 0,
+    "arnr-maxframes": 5,
+    "quant-b-adapt": 1
+}
 
-# Define presets as lists of encoder parameters
+# Define presets as dictionaries of encoder parameters
 presets = {
-    "720p": [
-        "--color-primaries=bt709",
-        "--transfer-characteristics=bt709",
-        "--matrix-coefficients=bt709",
-        "--sb-size=64"
+    "720p": {
+        "color-primaries": "bt709",
+        "transfer-characteristics": "bt709",
+        "matrix-coefficients": "bt709",
+        "tile-columns": 0,
+        "tile-rows": 0,
         # Add more parameters as needed
-    ],
-    "1080p": [
-        "--color-primaries=bt709",
-        "--transfer-characteristics=bt709",
-        "--matrix-coefficients=bt709",
-        "--sb-size=64"
+    },
+    "1080p": {
+        "color-primaries": "bt709",
+        "transfer-characteristics": "bt709",
+        "matrix-coefficients": "bt709",
+        "tile-columns": 1,
+        "tile-rows": 0,
         # Add more parameters as needed
-    ],
+    },
+    "1080p-hdr": {
+        "color-primaries": "bt2020",
+        "transfer-characteristics": "smpte2084",
+        "matrix-coefficients": "bt2020ncl",
+        "deltaq-mode": 5,
+        "tile-columns": 1,
+        "tile-rows": 0,
+        # Add more parameters as needed
+    },
+    "1440p-hdr": {
+        "color-primaries": "bt2020",
+        "transfer-characteristics": "smpte2084",
+        "matrix-coefficients": "bt2020ncl",
+        "deltaq-mode": 5,
+        "tile-columns": 1,
+        "tile-rows": 1,
+        # Add more parameters as needed
+    },
+    "2160p-hdr": {
+        "color-primaries": "bt2020",
+        "transfer-characteristics": "smpte2084",
+        "matrix-coefficients": "bt2020ncl",
+        "deltaq-mode": 5,
+        "tile-columns": 1,
+        "tile-rows": 1,
+        # Add more parameters as needed
+    },
     # Add more presets as needed
-}.get(preset, [])
+}.get(preset, {})
 
-# Merge default parameters and preset parameters into a single list
-encode_params = default_params + presets
+# Update or add parameters from the preset if they are not specified in valid_params
+for key, value in presets.items():
+    if key not in default_values or default_values[key] is None:
+        default_values[key] = value
+
+# Merge default parameters and preset parameters into a single dictionary
+encode_params = {**default_values, **presets}
+
+# Create a list of non-empty parameters in the format "--key=value"
+encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
 
 # Determine the output folder name based on the encode_script
 output_folder_name = os.path.splitext(os.path.basename(encode_script))[0]
@@ -513,7 +619,7 @@ output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl"
 
 # Create the reference files for FGS
 if graintable_method > 0:
-    create_FGS_table()
+    create_fgs_table()
     encode_params.append(f"--film-grain-table={output_grain_table}")
 else:
     encode_params.append(f"--film-grain-table={graintable}")
@@ -522,6 +628,8 @@ else:
 scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
 scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
 scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+if scd_method in (5, 6):
+    create_scxvid_file(scene_change_csv)
 scene_changes = scene_change_detection(scd_script)
 
 # Create the AVS scripts, prepare encoding and concatenation commands for chunks
