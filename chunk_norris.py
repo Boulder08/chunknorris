@@ -177,14 +177,14 @@ def create_fgs_table():
                 grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
         else:
             referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
-            referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 60 seconds of frames if empty) : ")
+            referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 5 seconds of frames if empty) : ")
             with open(grain_script, 'w') as grain_file:
                 grain_file.write(f'Import("{encode_script}")\n')
                 if referencefile_end_frame != '':
                     grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
                 else:
                     grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
-                    grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 60)\n')
+                    grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 5)\n')
                     grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)')
 
         # Create the encoding command lines
@@ -454,7 +454,7 @@ parser.add_argument('--tile-columns', nargs='?', type=int)
 parser.add_argument('--tile-rows', nargs='?', type=int)
 parser.add_argument('--tune', nargs='?', default='ssim', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
-parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
+parser.add_argument('--graintable-method', nargs='?', default=2, type=int)
 parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
 parser.add_argument('--scd-method', nargs='?', default=1, type=int)
