@@ -73,8 +73,8 @@ python chunk_norris.py encode_script [options]
 ## Options
 
 **--preset**: Choose a preset defined in the script. You can add your own and change the existing ones.
-- Example: --preset "720p"
-- Default: "1080p"
+- Example: --preset 720p
+- Default: 1080p
 
 **--q**: Defines a Q value the encoder will use. It does a one-pass encode in Q mode, which is the closest to constant quality with a single pass.
 - Example: --q 16
@@ -107,6 +107,14 @@ python chunk_norris.py encode_script [options]
 **--tile-columns** and **--tile-rows**: Define the corresponding parameters in aomenc.
 - Example: --tile-columns 1 --tile-rows 1
 - Default: None for both
+
+**--tune**: Defines the tuning to use in aomenc. Use 'ssim' or 'omni'.
+- Example: --tune omni
+- Default: ssim
+
+**--tune-content**: Defines the content-based (psy) tuning to use in aomenc. With the lavish mod, 'psy' is recommended.
+- Example: --tune-content default
+- Default: psy
 
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
 - --graintable-method 0 skips creation.

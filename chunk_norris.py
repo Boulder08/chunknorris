@@ -177,7 +177,7 @@ def create_fgs_table():
                 grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
         else:
             referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
-            referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 60 seconds of frames if empty): ")
+            referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 60 seconds of frames if empty) : ")
             with open(grain_script, 'w') as grain_file:
                 grain_file.write(f'Import("{encode_script}")\n')
                 if referencefile_end_frame != '':
@@ -452,6 +452,8 @@ parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--sharpness', nargs='?', default=2, type=int)
 parser.add_argument('--tile-columns', nargs='?', type=int)
 parser.add_argument('--tile-rows', nargs='?', type=int)
+parser.add_argument('--tune', nargs='?', default='ssim', type=str)
+parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
@@ -484,6 +486,8 @@ scd_method = args.scd_method
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
+tune = args.tune
+tune_content = args.tune_content
 
 # Set some more case dependent default values
 if noiselevel is None or graintable or graintable_method > 0:
@@ -502,12 +506,12 @@ default_values = {
     "aq-mode": 0,
     "deltaq-mode": 1,
     "enable-chroma-deltaq": 1,
-    "tune-content": "psy",
-    "tune": "ssim",
+    "tune-content": tune_content,
+    "tune": tune,
     "lag-in-frames": 64,
     "enable-qm": 1,
-    "qm-min": 0,
-    "qm-max": 8,
+    "qm-min": 5,
+    "qm-max": 9,
     "sb-size": 64,
     "row-mt": 1,
     "kf-min-dist": 5,
