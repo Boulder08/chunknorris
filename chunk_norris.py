@@ -30,6 +30,41 @@ def clean_folder(folder):
             shutil.rmtree(item_path)
 
 
+# Define a function to extract sections from the baseline grain table file
+def extract_sections(filename):
+    sections = []
+    current_section = []
+    section_number = 0  # Track the current section number
+
+    with open(filename, 'r') as file:
+        for line in file:
+            if line.startswith('E'):
+                # If we encounter a line starting with 'E', it's the start of a new section
+                current_section = [line]
+                section_number += 1  # Increment section number
+                # print(f"Processing section {section_number}...")
+            elif current_section:
+                # If we are in a section, add the line to the current section
+                current_section.append(line)
+
+            if len(current_section) == 8:  # Each section has 8 lines, including the header
+                sections.append(current_section)
+                # length = timestamp_difference(current_section)
+                # print (length)
+                current_section = []
+
+    if not sections:
+        print("No valid sections found in the file.")
+    return sections
+
+
+# Define a function to calculate the timestamp difference for a section in the baseline grain table
+def timestamp_difference(section):
+    start_timestamp = int(section[0].split()[1])
+    end_timestamp = int(section[0].split()[2])
+    return end_timestamp - start_timestamp
+
+
 def create_scxvid_file(scene_change_csv):
     if scd_method == 5:
         with open(encode_script, 'r') as file:
@@ -167,25 +202,16 @@ def create_fgs_table():
     # Create the grain table only if it doesn't exist already
     if os.path.exists(output_grain_table) is False:
         grain_script = os.path.join(scripts_folder, f"grainscript.avs")
-
-        if graintable_method == 1:
-            with open(grain_script, 'w') as grain_file:
-                grain_file.write(f'Import("{encode_script}")\n')
+        referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
+        referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 5 seconds of frames if empty) : ")
+        with open(grain_script, 'w') as grain_file:
+            grain_file.write(f'Import("{encode_script}")\n')
+            if referencefile_end_frame != '':
+                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
+            else:
                 grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
-                grain_file.write('grain_frame_count = FrameCount()\n')
-                grain_file.write(f'step = Ceil(grain_frame_count / ({grain_clip_length} - 1))\n')
-                grain_file.write('SelectRangeEvery(step, grain_frame_rate * 2)')
-        else:
-            referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
-            referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 5 seconds of frames if empty) : ")
-            with open(grain_script, 'w') as grain_file:
-                grain_file.write(f'Import("{encode_script}")\n')
-                if referencefile_end_frame != '':
-                    grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
-                else:
-                    grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
-                    grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 5)\n')
-                    grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)')
+                grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 5)\n')
+                grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)')
 
         # Create the encoding command lines
         avs2yuv_command_grain = [
@@ -218,7 +244,7 @@ def create_fgs_table():
         grav1synth_command = [
             "grav1synth.exe",
             "diff",
-            "-o", output_grain_table,
+            "-o", output_grain_table_baseline,
             output_grain_file_lossless,
             output_grain_file_encoded
         ]
@@ -235,6 +261,43 @@ def create_fgs_table():
 
         print("\nCreating the FGS grain table file.\n")
         subprocess.run(grav1synth_command)
+
+        sections = extract_sections(output_grain_table_baseline)
+
+        if len(sections) == 1:
+            single_section = sections[0]
+
+            # Print the single section to the output file
+            print("\nFGS table (only one FGS section found) :")
+            with open(output_grain_table, 'w', newline='\n') as output_file:
+                print("filmgrn1", file=output_file)
+                for line in single_section:
+                    print(line, end='')  # Print to the console
+                    print(line, end='', file=output_file)  # Print to the output file
+        elif len(sections) >= 2:
+        # Find the second longest section based on timestamp difference
+
+            # Sort sections by timestamp difference in descending order
+            sorted_sections = sorted(sections, key=timestamp_difference, reverse=True)
+
+            # The second longest section is at index 1 (index 0 is the longest)
+            second_longest_section = sorted_sections[1]
+
+            # Replace the header with one from the first section
+            second_longest_section[0] = sections[0][0]
+
+            # Replace the end timestamp with 9223372036854775807
+            second_longest_section[0] = second_longest_section[0].replace(
+                second_longest_section[0].split()[2], '9223372036854775807'
+            )
+
+            with open(output_grain_table, 'w', newline='\n') as output_file:
+                print("filmgrn1", file=output_file)
+                print("\nFGS table:")
+                for line in second_longest_section:
+                    print(line, end='')  # Print to the console
+                    print(line, end='', file=output_file)  # Print to the output file
+
     else:
         print("The FGS grain table file exists already, skipping creation.\n")
 
@@ -454,7 +517,7 @@ parser.add_argument('--tile-columns', nargs='?', type=int)
 parser.add_argument('--tile-rows', nargs='?', type=int)
 parser.add_argument('--tune', nargs='?', default='ssim', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
-parser.add_argument('--graintable-method', nargs='?', default=2, type=int)
+parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
 parser.add_argument('--graintable', nargs='?', type=str)
 parser.add_argument('--scd-method', nargs='?', default=1, type=int)
@@ -619,6 +682,7 @@ output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
 output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.264")
 output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.webm")
 output_grain_table = os.path.split(encode_script)[0]
+output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
 output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
 
 # Create the reference files for FGS
