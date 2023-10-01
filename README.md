@@ -15,12 +15,13 @@ A Python script for chunked encoding using the aomenc CLI encoder
 
 Before using **Chunk Norris**, ensure you have the following dependencies installed and properly configured on your system:
 
-- Python 3.10.x (or a compatible 3.x version)
+- Python 3.10.x (or a compatible 3.x version) + support modules (see the beginning of the script)
 - (A scene change list in x264/x265 QP file format)
 - Avisynth+ (+ the SCXviD plugin if scdmethod 5 or 6)
 - avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
-- FFmpeg
+- ffmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows in PySceneDetect.**
+- ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
 - aomenc (the lavish mod is recommended)
 - grav1synth (in case of --graintable-method 1 or 2)
 
@@ -55,7 +56,7 @@ You can customize **Chunk Norris** by adjusting the following settings in the sc
 
 - **default_params**: Set common encoding parameters as a list.
 - **base_working_folder**: Define the base working folder where the script will organize its output.
-- **scene_change_file_path**: Specify the path to the QP file containing scene change information.
+- **presets**: Add or edit the existing presets for a set of encoder options. The ones you set in the preset override default ones.
 - Command-line arguments: Modify encoding parameters such as preset, quality (q), minimum chunk length, and more by passing them as arguments when running the script.
 
 ---
@@ -104,9 +105,13 @@ python chunk_norris.py encode_script [options]
 - Example: --sharpness 3
 - Default: 2
 
-**--tile-columns** and **--tile-rows**: Define the corresponding parameters in aomenc.
+**--tile-columns** and **--tile-rows**: Define the corresponding parameters for splitting the encoding (and decoding) into multiple tiles in aomenc.
 - Example: --tile-columns 1 --tile-rows 1
 - Default: None for both
+
+**-arnr-strength** and **--arnr-maxframes**: Define the parameters for internal alt-ref frame denoising.
+- Example: --arnr-strength 3 --arnr-maxframes 9
+- Default: 1 for arnr-strength, 7 for arnr-maxframes
 
 **--tune**: Defines the tuning to use in aomenc. Use 'ssim' or 'omni'.
 - Example: --tune omni

@@ -17,7 +17,24 @@ import concurrent.futures
 import shutil
 import argparse
 import csv
+import ffmpeg
 from tqdm import tqdm
+
+
+def get_video_width(video_path):
+    try:
+        probe = ffmpeg.probe(video_path, v='error')
+        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+        if video_stream:
+            width = int(video_stream['width'])
+            # print("Video width:", width)
+            return width
+        else:
+            print("No video stream found in the input video.")
+            return None
+    except ffmpeg.Error as e:
+        print(f"Error: {e.stderr}")
+        return None
 
 
 # Function to clean up a folder
@@ -204,14 +221,58 @@ def create_fgs_table():
         grain_script = os.path.join(scripts_folder, f"grainscript.avs")
         referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
         referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 5 seconds of frames if empty) : ")
+
+        # Check the need to pad the video because grav1synth :/ Supports resolutions only up to 4K
+        padleft = 0
+        padright = 0
+        video_width = get_video_width(encode_script)
+        if 3584 < video_width < 3840:
+            padleft = (3840 - video_width) / 2
+            if padleft % 2 != 0:
+                padleft += 1
+            padright = 3840 - video_width - padleft
+        elif 2560 < video_width < 3584:
+            padleft = (3584 - video_width) / 2
+            if padleft % 2 != 0:
+                padleft += 1
+            padright = 3584 - video_width - padleft
+        elif 1920 < video_width < 2560:
+            padleft = (2560 - video_width) / 2
+            if padleft % 2 != 0:
+                padleft += 1
+            padright = 2560 - video_width - padleft
+        elif 1480 < video_width < 1920:
+            padleft = (1920 - video_width) / 2
+            if padleft % 2 != 0:
+                padleft += 1
+            padright = 1920 - video_width - padleft
+        elif 1280 < video_width < 1480:
+            padleft = (1480 - video_width) / 2
+            if padleft % 2 != 0:
+                padleft += 1
+            padright = 1480 - video_width - padleft
+        elif video_width < 1280:
+            padleft = (1280 - video_width) / 2
+            if padleft % 2 != 0:
+                padleft += 1
+            padright = 1280 - video_width - padleft
+
+        print("\nVideo width:", video_width)
+        print("Padding left:", padleft)
+        print("Padding right:", padright)
+        print("Final width:", video_width + padleft + padright)
+        print("\n")
+
         with open(grain_script, 'w') as grain_file:
             grain_file.write(f'Import("{encode_script}")\n')
             if referencefile_end_frame != '':
-                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})')
+                grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})\n')
+                grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
             else:
                 grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
                 grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 5)\n')
-                grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)')
+                grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)\n')
+                grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
 
         # Create the encoding command lines
         avs2yuv_command_grain = [
@@ -231,13 +292,13 @@ def create_fgs_table():
             "-"
         ]
 
-        x264_command_grain = [
-            "x264.exe",
-            "--demuxer", "y4m",
-            "--preset", "slow",
-            "--crf", "0",
-            "-o", output_grain_file_lossless,
-            "-"
+        ffmpeg_command_grain = [
+            "ffmpeg.exe",
+            "-i", grain_script,
+            "-loglevel", "warning",
+            "-c:v", "ffv1",
+            "-pix_fmt", "yuv420p10le",
+            output_grain_file_lossless
         ]
 
         # Create the command line to compare the original and encoded files to get the grain table
@@ -255,9 +316,7 @@ def create_fgs_table():
         aomenc_grain_process.communicate()
 
         print("\n\nEncoding the FGS analysis lossless file.\n")
-        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
-        x264_grain_process = subprocess.Popen(x264_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
-        x264_grain_process.communicate()
+        subprocess.run(ffmpeg_command_grain)
 
         print("\nCreating the FGS grain table file.\n")
         subprocess.run(grav1synth_command)
@@ -274,6 +333,7 @@ def create_fgs_table():
                 for line in single_section:
                     print(line, end='')  # Print to the console
                     print(line, end='', file=output_file)  # Print to the output file
+            print("\n")
         elif len(sections) >= 2:
         # Find the second longest section based on timestamp difference
 
@@ -297,7 +357,7 @@ def create_fgs_table():
                 for line in second_longest_section:
                     print(line, end='')  # Print to the console
                     print(line, end='', file=output_file)  # Print to the output file
-
+            print("\n")
     else:
         print("The FGS grain table file exists already, skipping creation.\n")
 
@@ -465,7 +525,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
         avs2yuv_command = [
             "avs2yuv64.exe",
             "-no-mt",
-            scene_script_file,  # Use the Avisynth script for this scene
+            '"'+scene_script_file+'"',  # Use the Avisynth script for this scene
             "-",
             "2> nul"
         ]
@@ -476,7 +536,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
             *encode_params,
             "--passes=1",
             f"--cq-level={q}",
-            "-o", output_chunk,
+            "-o", '"'+output_chunk+'"',
             "-"
         ]
 
@@ -515,6 +575,8 @@ parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--sharpness', nargs='?', default=2, type=int)
 parser.add_argument('--tile-columns', nargs='?', type=int)
 parser.add_argument('--tile-rows', nargs='?', type=int)
+parser.add_argument('--arnr-strength', default=1, nargs='?', type=int)
+parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
 parser.add_argument('--tune', nargs='?', default='ssim', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
@@ -526,9 +588,6 @@ parser.add_argument('--downscale-scd', action="store_true")
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
-
-# Set the QP file path
-scene_change_file_path = "F:\\Temp\\Captures"
 
 # Command-line arguments
 args = parser.parse_args()
@@ -551,10 +610,18 @@ downscale_scd = args.downscale_scd
 cpu = args.cpu
 tune = args.tune
 tune_content = args.tune_content
+arnr_strength = args.arnr_strength
+arnr_maxframes = args.arnr_maxframes
+
+# Set the QP file path
+# scene_change_file_path = "F:\\Temp\\Captures"
+scene_change_file_path = os.path.dirname(encode_script)
 
 # Set some more case dependent default values
 if noiselevel is None or graintable or graintable_method > 0:
     noiselevel = 0
+if graintable:
+    graintable_method = 0
 if scdthresh is None:
     if scd_method in (1, 2):
         scdthresh = 0.3
@@ -588,9 +655,9 @@ default_values = {
     "sharpness": sharpness,
     "enable-cdef": 0,
     "enable-fwd-kf": 1,
-    "arnr-strength": 0,
-    "arnr-maxframes": 5,
-    "quant-b-adapt": 1
+    "arnr-strength": arnr_strength,
+    "arnr-maxframes": arnr_maxframes,
+    "quant-b-adapt": 1,
 }
 
 # Define presets as dictionaries of encoder parameters
@@ -601,6 +668,7 @@ presets = {
         "matrix-coefficients": "bt709",
         "tile-columns": 0,
         "tile-rows": 0,
+        "max-partition-size": 32,
         # Add more parameters as needed
     },
     "1080p": {
@@ -609,6 +677,7 @@ presets = {
         "matrix-coefficients": "bt709",
         "tile-columns": 1,
         "tile-rows": 0,
+        "max-partition-size": 32,
         # Add more parameters as needed
     },
     "1080p-hdr": {
@@ -618,6 +687,7 @@ presets = {
         "deltaq-mode": 5,
         "tile-columns": 1,
         "tile-rows": 0,
+        "max-partition-size": 32,
         # Add more parameters as needed
     },
     "1440p-hdr": {
@@ -679,7 +749,7 @@ output_name = os.path.splitext(os.path.basename(encode_script))[0]
 output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
 
 # Generate the FGS analysis file names
-output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.264")
+output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
 output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.webm")
 output_grain_table = os.path.split(encode_script)[0]
 output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
@@ -688,9 +758,9 @@ output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl"
 # Create the reference files for FGS
 if graintable_method > 0:
     create_fgs_table()
-    encode_params.append(f"--film-grain-table={output_grain_table}")
+    encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
 else:
-    encode_params.append(f"--film-grain-table={graintable}")
+    encode_params.append(f"--film-grain-table=\"{graintable}\"")
 
 # Detect scene changes
 scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
