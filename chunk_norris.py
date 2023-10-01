@@ -719,6 +719,15 @@ for key, value in presets.items():
 # Merge default parameters and preset parameters into a single dictionary
 encode_params = {**default_values, **presets}
 
+# Iterate through command-line arguments and update the encode_params dictionary
+for key, value in vars(args).items():
+    # Convert underscores to hyphens for comparison
+    param_key = key.replace('_', '-')
+
+    # Check if the parameter exists in encode_params and is not None
+    if param_key in encode_params and value is not None:
+        encode_params[param_key] = value
+
 # Create a list of non-empty parameters in the format "--key=value"
 encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
 
