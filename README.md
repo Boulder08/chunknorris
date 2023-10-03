@@ -58,6 +58,8 @@ You can customize **Chunk Norris** by adjusting the following settings in the sc
 - **base_working_folder**: Define the base working folder where the script will organize its output.
 - **presets**: Add or edit the existing presets for a set of encoder options. The ones you set in the preset override default ones.
 - Command-line arguments: Modify encoding parameters such as preset, quality (q), minimum chunk length, and more by passing them as arguments when running the script.
+  
+  **There are some ready-made film grain tables available in the av1-graintables directory.**
 
 ---
 
@@ -133,7 +135,7 @@ python chunk_norris.py encode_script [options]
 - Example: --grain-clip-length 120
 - Default: 60
 
-**--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth.
+**--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory.
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
 
