@@ -5,11 +5,15 @@ A Python script for chunked encoding using the aomenc CLI encoder
 
 ---
 
+
+
 ## Overview
 
 **Chunk Norris** is a simple Python script designed for chunked encoding using the **aomenc CLI encoder**. This script allows you to process large video files more efficiently by dividing them into smaller, manageable chunks for parallel encoding. It also offers the flexibility to set various encoding parameters and presets to suit your specific needs.
 
 ---
+
+
 
 ## Prerequisites
 
@@ -28,6 +32,8 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
 
 ---
+
+
 
 ## Process
 
@@ -50,6 +56,8 @@ Additionally, make sure that all the tools are accessible from your system's PAT
 
 ---
 
+
+
 ## Configuration
 
 You can customize **Chunk Norris** by adjusting the following settings in the script:
@@ -63,6 +71,7 @@ You can customize **Chunk Norris** by adjusting the following settings in the sc
 
 ---
 
+
 ## Usage
 
 To use **Chunk Norris**, run the script from the command line with the following syntax:
@@ -72,6 +81,21 @@ python chunk_norris.py encode_script [options]
 ```
 
 ---
+
+
+
+## Some ideas for number of parallel encodes
+
+I've found these numbers generally saturating the CPU near ~100% but not go overboard, using a Ryzen 5950X (16c/32t):
+- 1440p : 3
+- 1080p : 4
+- 720p : 6
+
+Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 16 myself with no ill effects.
+
+---
+
+
 
 ## Options
 
@@ -135,7 +159,7 @@ python chunk_norris.py encode_script [options]
 - Example: --grain-clip-length 120
 - Default: 60
 
-**--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory.
+**--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
 
@@ -163,6 +187,8 @@ python chunk_norris.py encode_script [options]
 
 ---
 
+
+
 ## Output
 
 The script will create the following folders in the specified base_working_folder:
@@ -174,6 +200,8 @@ The script will create the following folders in the specified base_working_folde
 The final concatenated video file will be named based on the input Avisynth script and saved in the output folder.
 
 ---
+
+
 
 ## Example
 
