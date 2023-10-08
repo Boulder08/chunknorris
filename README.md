@@ -24,12 +24,21 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - Avisynth+ (+ the SCXviD plugin if scdmethod 5 or 6)
 - avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
 - ffmpeg
-- PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows in PySceneDetect.**
+- PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
 - aomenc (the lavish mod is recommended)
 - grav1synth (in case of --graintable-method 1 or 2)
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
+
+I built some aomenc-lavish binaries for easy access, find the package here:
+https://drive.google.com/file/d/1i8L0E1TPty1tr3ugucbbyJZhgk4EOt0A/view?usp=drive_link
+
+Based on the current (as of Sept 27th, 2023) source and the Sept 25th patch by clybius (thanks!)
+
+The source: https://github.com/Clybius/aom-av1-lavish/tree/Endless_Merging, the patch can be found from the AV1 Discord channel.
+
+
 
 ---
 
@@ -46,7 +55,6 @@ Additionally, make sure that all the tools are accessible from your system's PAT
    The encoder parameters are picked up from the default parameters + selected preset.
 
 4. The encoding queue is ordered from longest to shortest chunk. This ensures that there will not be any single long encodes running at the end.
-   The last scene is encoded in the first batch of chunks since we don't know its length based on the scene changes.
    
 5. If you have enabled the creation of a grain table or supply it with a separate parameter, it is applied during the encode.
 
@@ -103,6 +111,14 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --preset 720p
 - Default: 1080p
 
+**--cpu**: Defines the '--cpu-used' parameter in aomenc. Lower is better, but also slower.
+- Example: --cpu 6
+- Default: 3
+
+**--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead.
+- Example: --threads 4
+- Default: 8
+
 **--q**: Defines a Q value the encoder will use. It does a one-pass encode in Q mode, which is the closest to constant quality with a single pass.
 - Example: --q 16
 - Default: 14
@@ -114,14 +130,6 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 **--max-parallel-encodes**: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory.
 - Example: --max-parallel-encodes 8
 - Default: 6
-
-**--cpu**: Defines the '--cpu-used' parameter in aomenc. Lower is better, but also slower.
-- Example: --cpu 6
-- Default: 3
-
-**--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead.
-- Example: --threads 4
-- Default: 8
 
 **--noiselevel**: Defines the strength of the internal Film Grain Synthesis. Disabled if a grain table is used.
 - Example: --noiselevel 20
@@ -155,9 +163,9 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --graintable-method 0
 - Default: 1
 
-**--grain-clip-length**: Defines the amount of chunks used for creating the Film Grain Synthesis grain table, when --graintable-method is 1.
-- Example: --grain-clip-length 120
-- Default: 60
+**--graintable-sat**: Defines the level of saturation to have in the graintable analysis clip. The recommended range is 0..1 where 0 means black-and-white and 1 does nothing. Uses the Avisynth+ built-in filter "Tweak".
+- Example: --graintable-sat 0.2
+- Default: 0
 
 **--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
 - Example: --graintable C:\Temp\grain.tbl
@@ -173,15 +181,19 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - --scd-method 5 uses SCXviD for detection and a separate script like in method 1.
 - --scd-method 6 uses SCXviD for detection and the encoding script like in method 2.
 - Example: --scd-method 5
-- Default: 1
+- Default: 3
+
+**--scd-grading**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for grading an HDR source in the scene change detection phase (improves accuracy).
+- Example: --scd-grading 0
+- Default: 0 for SDR, 1 for HDR sources
 
 **--scdthresh**: Defines the threshold for scene change detection in ffmpeg. Lower values mean more scene changes detected, but also more false detections.
 - Example: --ffmpeg-scd 0.4
-- Default: 0.3 for --scd-method 1 and 2, 2.0 for --scd-method 3 and 4
+- Default: 0.3 for --scd-method 1 and 2, 1.25 for --scd-method 3 and 4
 
-**--downscale-scd**: Set this parameter to enable downscaling using ReduceBy2() in the scene change detection script (if --scd-method is 1).
-- Example: --downscale-scd
-- Default: None
+**--downscale-scd**: Set this parameter to enable downscaling in the scene change detection script using the factor set by the parameter. Applies if --scd-method is 1, 3 or 5. Improves performance a lot without much effect on accuracy.
+- Example: --downscale-scd 2
+- Default: 4
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
