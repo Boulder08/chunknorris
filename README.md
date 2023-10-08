@@ -184,7 +184,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Default: 3
 
 **--scd-tonemap**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for tone mapping an HDR source in the scene change detection phase (improves accuracy).
-- Example: --scd-grading 0
+- Example: --scd-tonemap 0
 - Default: 0 for SDR, 1 for HDR sources
 
 **--scdthresh**: Defines the threshold for scene change detection in ffmpeg. Lower values mean more scene changes detected, but also more false detections.
