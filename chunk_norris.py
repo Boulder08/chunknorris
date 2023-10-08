@@ -22,19 +22,18 @@ from tqdm import tqdm
 
 
 def get_video_props(video_path):
-    try:
-        probe = ffmpeg.probe(video_path, v='error')
-        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-        if video_stream:
-            video_width = int(video_stream['width'])
-            video_length = int(video_stream['nb_frames'])
+    probe = ffmpeg.probe(video_path, v='error')
+    video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+    if video_stream:
+        video_width = int(video_stream['width'])
+        video_length = int(video_stream['nb_frames'])
+        try:
             video_transfer = str(video_stream['color_transfer'])
-            return video_width, video_length, video_transfer
-        else:
-            print("No video stream found in the input video.")
-            return None
-    except ffmpeg.Error as e:
-        print(f"Error: {e.stderr}")
+        except:
+            video_transfer = 'unknown'
+        return video_width, video_length, video_transfer
+    else:
+        print("No video stream found in the input video.")
         return None
 
 
@@ -673,7 +672,7 @@ default_values = {
     "enable-qm": 1,
     "sb-size": 64,
     "kf-min-dist": 5,
-    "kf-max-dist": 480,
+    "kf-max-dist": 240,
     "disable-trellis-quant": 0,
     "enable-dnl-denoising": 0,
     "denoise-noise-level": noiselevel,
