@@ -183,7 +183,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --scd-method 5
 - Default: 3
 
-**--scd-grading**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for grading an HDR source in the scene change detection phase (improves accuracy).
+**--scd-tonemap**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for tone mapping an HDR source in the scene change detection phase (improves accuracy).
 - Example: --scd-grading 0
 - Default: 0 for SDR, 1 for HDR sources
 
