@@ -21,14 +21,15 @@ import ffmpeg
 from tqdm import tqdm
 
 
-def get_video_width(video_path):
+def get_video_props(video_path):
     try:
         probe = ffmpeg.probe(video_path, v='error')
         video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
         if video_stream:
-            width = int(video_stream['width'])
-            # print("Video width:", width)
-            return width
+            video_width = int(video_stream['width'])
+            video_length = int(video_stream['nb_frames'])
+            video_transfer = str(video_stream['color_transfer'])
+            return video_width, video_length, video_transfer
         else:
             print("No video stream found in the input video.")
             return None
@@ -90,14 +91,18 @@ def create_scxvid_file(scene_change_csv):
         with open(scd_script, 'w') as scd_file:
             # Write the first line content to the new file
             scd_file.write(source)
-            if downscale_scd:
+            if downscale_scd > 1:
                 scd_file.write('\n')
-                scd_file.write('ReduceBy2()\n')
+                scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                 scd_file.write('Crop(16,16,-16,-16)\n')
+            if scd_grading != 0:
+                scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)\n')
             scd_file.write(f'SCXvid(log="{scene_change_csv}")')
     else:
         with open(scd_script, 'w') as scd_file:
             scd_file.write(f'Import("{encode_script}")\n')
+            if scd_grading != 0:
+                scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)\n')
             scd_file.write(f'SCXvid(log="{scene_change_csv}")')
 
     scene_change_command = [
@@ -204,9 +209,13 @@ def pyscd(scd_script):
         "scenedetect.exe",
         "-i", scd_script,
         "-b", "moviepy",
+        "-q",
+        "-d", "1",
         "-o", output_folder_name,
         "detect-adaptive",
         "-t", f"{scdthresh}",
+        "-c", "6",
+        "-f", "4",
         "-m", f"{min_chunk_length}",
         "list-scenes",
         "-f", scene_change_csv
@@ -222,10 +231,10 @@ def create_fgs_table():
         referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
         referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 5 seconds of frames if empty) : ")
 
-        # Check the need to pad the video because grav1synth :/ Supports resolutions only up to 4K
+        # Check the need to pad the video because grav1synth :/
+        # This check and workaround currently supports resolutions only up to 4K
         padleft = 0
         padright = 0
-        video_width = get_video_width(encode_script)
         if 3584 < video_width < 3840:
             padleft = (3840 - video_width) / 2
             if padleft % 2 != 0:
@@ -267,11 +276,15 @@ def create_fgs_table():
             grain_file.write(f'Import("{encode_script}")\n')
             if referencefile_end_frame != '':
                 grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})\n')
+                if graintable_sat < 1.0:
+                    grain_file.write(f'Tweak(sat={graintable_sat})\n')
                 grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
             else:
                 grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
                 grain_file.write(f'grain_end_frame = {referencefile_start_frame} + (grain_frame_rate * 5)\n')
                 grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)\n')
+                if graintable_sat < 1.0:
+                    grain_file.write(f'Tweak(sat={graintable_sat})\n')
                 grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
 
         # Create the encoding command lines
@@ -279,7 +292,7 @@ def create_fgs_table():
             "avs2yuv64.exe",
             "-no-mt",
             grain_script,
-            "-",
+            "-"
             #        "2> nul"
         ]
 
@@ -399,10 +412,12 @@ def scene_change_detection(scd_script):
                 with open(scd_script, 'w') as scd_file:
                     # Write the first line content to the new file
                     scd_file.write(source)
-                    if downscale_scd:
+                    if downscale_scd > 1:
                         scd_file.write('\n')
-                        scd_file.write('ReduceBy2()\n')
+                        scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                         scd_file.write('Crop(16,16,-16,-16)')
+                    if scd_grading != 0:
+                        scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
             scene_changes = ffscd(scd_script)
         else:
             print(f"Using scene change analysis script: {scd_script}.\n")
@@ -422,7 +437,11 @@ def scene_change_detection(scd_script):
                 with open(scd_script, 'w') as scd_file:
                     # Write the first line content to the new file
                     scd_file.write(source)
+                    scd_file.write('\n')
+                    scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                     scd_file.write('Crop(16,16,-16,-16)')
+                    if scd_grading != 0:
+                        scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
             pyscd(scd_script)
         else:
             print(f"Using scene change analysis script: {scd_script}.\n")
@@ -444,7 +463,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
             if i < len(scene_changes) - 1:
                 end_frame = scene_changes[i + 1] - 1
             else:
-                end_frame = 0
+                end_frame = video_length - 1
             # print(i,start_frame,end_frame)
 
             # Check if the current scene is too short
@@ -464,10 +483,10 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
 
                 if next_scene_index == len(scene_changes):
                     # No more scenes left to combine
-                    end_frame = 0  # Set end_frame to 0 for the last scene
+                    end_frame = video_length - 1  # Set end_frame based on the total video length for the last scene (Avisynth counts from 0, hence the minus one)
                 # print(f'Next scene index: {next_scene_index}')
             chunk_length = end_frame - start_frame + 1
-            chunk_length = 999999 if chunk_length < 0 else chunk_length
+            # chunk_length = 999999 if chunk_length < 0 else chunk_length
 
             chunkdata = {
                 'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
@@ -506,7 +525,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
             }
             chunklist.append(chunkdata)
 
-#    print (chunklist)
+    chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in chunklist}
 
     for i in chunklist:
         output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
@@ -541,7 +560,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
         ]
 
         encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
-    return encode_commands, input_files, chunklist
+    return encode_commands, input_files, chunklist, chunklist_dict
 
 
 # Function to execute encoding commands and print them for debugging
@@ -580,11 +599,12 @@ parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
 parser.add_argument('--tune', nargs='?', default='ssim', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
-parser.add_argument('--grain-clip-length', nargs='?', default=60, type=int)
+parser.add_argument('--graintable-sat', nargs='?', default=0, type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--scd-method', nargs='?', default=1, type=int)
+parser.add_argument('--scd-method', nargs='?', default=3, type=int)
+parser.add_argument('--scd-grading', nargs='?', type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
-parser.add_argument('--downscale-scd', action="store_true")
+parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -603,8 +623,9 @@ tile_columns = args.tile_columns
 tile_rows = args.tile_rows
 graintable = args.graintable
 graintable_method = args.graintable_method
-grain_clip_length = args.grain_clip_length
+graintable_sat = args.graintable_sat
 scd_method = args.scd_method
+scd_grading = args.scd_grading
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
@@ -613,8 +634,13 @@ tune_content = args.tune_content
 arnr_strength = args.arnr_strength
 arnr_maxframes = args.arnr_maxframes
 
-# Set the QP file path
-# scene_change_file_path = "F:\\Temp\\Captures"
+# Store the full path of encode_script
+encode_script = os.path.abspath(encode_script)
+
+# Get video props from the source
+video_width, video_length, video_transfer = get_video_props(encode_script)
+
+# Set scene change helper file to use the same path as the original source script
 scene_change_file_path = os.path.dirname(encode_script)
 
 # Set some more case dependent default values
@@ -626,7 +652,12 @@ if scdthresh is None:
     if scd_method in (1, 2):
         scdthresh = 0.3
     else:
-        scdthresh = 2.0
+        scdthresh = 1.25
+if scd_grading is None:
+    if video_transfer == 'smpte2084':
+        scd_grading = 1
+    else:
+        scd_grading = 0
 
 default_values = {
     "cpu-used": cpu,
@@ -640,10 +671,7 @@ default_values = {
     "tune": tune,
     "lag-in-frames": 64,
     "enable-qm": 1,
-    "qm-min": 5,
-    "qm-max": 9,
     "sb-size": 64,
-    "row-mt": 1,
     "kf-min-dist": 5,
     "kf-max-dist": 480,
     "disable-trellis-quant": 0,
@@ -669,6 +697,21 @@ presets = {
         "tile-columns": 0,
         "tile-rows": 0,
         "max-partition-size": 32,
+        "max-reference-frames": 5,
+        # Add more parameters as needed
+    },
+    "720p-lavish": {
+        "color-primaries": "bt709",
+        "transfer-characteristics": "bt709",
+        "matrix-coefficients": "bt709",
+        "tile-columns": 0,
+        "tile-rows": 0,
+        "max-partition-size": 32,
+        "ssim-rd-mult": 125,
+        "luma-bias": 33,
+        "luma-bias-midpoint": 66,
+        "luma-bias-strength": 20,
+        "max-reference-frames": 5,
         # Add more parameters as needed
     },
     "1080p": {
@@ -678,6 +721,21 @@ presets = {
         "tile-columns": 1,
         "tile-rows": 0,
         "max-partition-size": 32,
+        "max-reference-frames": 4,
+        # Add more parameters as needed
+    },
+    "1080p-lavish": {
+        "color-primaries": "bt709",
+        "transfer-characteristics": "bt709",
+        "matrix-coefficients": "bt709",
+        "tile-columns": 1,
+        "tile-rows": 0,
+        "max-partition-size": 32,
+        "ssim-rd-mult": 125,
+        "luma-bias": 33,
+        "luma-bias-midpoint": 66,
+        "luma-bias-strength": 20,
+        "max-reference-frames": 4,
         # Add more parameters as needed
     },
     "1080p-hdr": {
@@ -688,6 +746,22 @@ presets = {
         "tile-columns": 1,
         "tile-rows": 0,
         "max-partition-size": 32,
+        "max-reference-frames": 4,
+        # Add more parameters as needed
+    },
+    "1080p-hdr-lavish": {
+        "color-primaries": "bt2020",
+        "transfer-characteristics": "smpte2084",
+        "matrix-coefficients": "bt2020ncl",
+        "deltaq-mode": 5,
+        "tile-columns": 1,
+        "tile-rows": 0,
+        "max-partition-size": 32,
+        "ssim-rd-mult": 125,
+        "luma-bias": 33,
+        "luma-bias-midpoint": 66,
+        "luma-bias-strength": 20,
+        "max-reference-frames": 4,
         # Add more parameters as needed
     },
     "1440p-hdr": {
@@ -697,6 +771,23 @@ presets = {
         "deltaq-mode": 5,
         "tile-columns": 1,
         "tile-rows": 1,
+        "max-partition-size": 64,
+        "max-reference-frames": 4,
+        # Add more parameters as needed
+    },
+    "1440p-hdr-lavish": {
+        "color-primaries": "bt2020",
+        "transfer-characteristics": "smpte2084",
+        "matrix-coefficients": "bt2020ncl",
+        "deltaq-mode": 5,
+        "tile-columns": 1,
+        "tile-rows": 1,
+        "max-partition-size": 64,
+        "ssim-rd-mult": 125,
+        "luma-bias": 33,
+        "luma-bias-midpoint": 66,
+        "luma-bias-strength": 20,
+        "max-reference-frames": 4,
         # Add more parameters as needed
     },
     "2160p-hdr": {
@@ -706,6 +797,23 @@ presets = {
         "deltaq-mode": 5,
         "tile-columns": 1,
         "tile-rows": 1,
+        "max-partition-size": 64,
+        "max-reference-frames": 4,
+        # Add more parameters as needed
+    },
+    "2160p-hdr-lavish": {
+        "color-primaries": "bt2020",
+        "transfer-characteristics": "smpte2084",
+        "matrix-coefficients": "bt2020ncl",
+        "deltaq-mode": 5,
+        "tile-columns": 1,
+        "tile-rows": 1,
+        "max-partition-size": 64,
+        "ssim-rd-mult": 125,
+        "luma-bias": 33,
+        "luma-bias-midpoint": 66,
+        "luma-bias-strength": 20,
+        "max-reference-frames": 4,
         # Add more parameters as needed
     },
     # Add more presets as needed
@@ -750,9 +858,6 @@ os.makedirs(output_folder, exist_ok=True)
 os.makedirs(scripts_folder, exist_ok=True)
 os.makedirs(chunks_folder, exist_ok=True)
 
-# Store the full path of encode_script
-encode_script = os.path.abspath(encode_script)
-
 # Define final video file name
 output_name = os.path.splitext(os.path.basename(encode_script))[0]
 output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
@@ -783,22 +888,21 @@ scene_changes = scene_change_detection(scd_script)
 encode_commands = []  # List to store the encoding commands
 input_files = []  # List to store input files for concatenation
 chunklist = []  # Helper list for producing the encoding and concatenation lists
-encode_commands, input_files, chunklist = preprocess_chunks(encode_commands, input_files, chunklist)
+completed_chunks = []  # List of completed chunks
 
 # Run encoding commands with a set maximum of concurrent processes
-completed_chunks = []
-
-# Create a tqdm progress bar
-progress_bar = tqdm(total=len(chunklist), desc="Progress", unit="step")
+encode_commands, input_files, chunklist, chunklist_dict = preprocess_chunks(encode_commands, input_files, chunklist)
+progress_bar = tqdm(total=video_length, desc="Progress", unit="frames", smoothing=0)
 
 with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
     futures = {executor.submit(run_encode_command, cmd): cmd for cmd in encode_commands}
     for future in concurrent.futures.as_completed(futures):
         output_chunk = future.result()
-        progress_bar.update(1)
+        parts = output_chunk.split('_')
+        chunk_number = int(str(parts[-1].split('.')[0]))
+        progress_bar.update(chunklist_dict.get(chunk_number))
         completed_chunks.append(output_chunk)
         # print(f"Encoding for scene completed: {output_chunk}")
-
 
 # Wait for all encoding processes to finish before concatenating
 progress_bar.close()
