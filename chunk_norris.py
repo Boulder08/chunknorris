@@ -95,13 +95,13 @@ def create_scxvid_file(scene_change_csv):
                 scd_file.write('\n')
                 scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                 scd_file.write('Crop(16,16,-16,-16)\n')
-            if scd_grading != 0:
+            if scd_tonemap != 0:
                 scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)\n')
             scd_file.write(f'SCXvid(log="{scene_change_csv}")')
     else:
         with open(scd_script, 'w') as scd_file:
             scd_file.write(f'Import("{encode_script}")\n')
-            if scd_grading != 0:
+            if scd_tonemap != 0:
                 scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)\n')
             scd_file.write(f'SCXvid(log="{scene_change_csv}")')
 
@@ -416,7 +416,7 @@ def scene_change_detection(scd_script):
                         scd_file.write('\n')
                         scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                         scd_file.write('Crop(16,16,-16,-16)')
-                    if scd_grading != 0:
+                    if scd_tonemap != 0:
                         scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
             scene_changes = ffscd(scd_script)
         else:
@@ -440,7 +440,7 @@ def scene_change_detection(scd_script):
                     scd_file.write('\n')
                     scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                     scd_file.write('Crop(16,16,-16,-16)')
-                    if scd_grading != 0:
+                    if scd_tonemap != 0:
                         scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
             pyscd(scd_script)
         else:
@@ -602,7 +602,7 @@ parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', default=0, type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
 parser.add_argument('--scd-method', nargs='?', default=3, type=int)
-parser.add_argument('--scd-grading', nargs='?', type=int)
+parser.add_argument('--scd-tonemap', nargs='?', type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
 parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
 
@@ -625,7 +625,7 @@ graintable = args.graintable
 graintable_method = args.graintable_method
 graintable_sat = args.graintable_sat
 scd_method = args.scd_method
-scd_grading = args.scd_grading
+scd_tonemap = args.scd_tonemap
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
@@ -653,11 +653,11 @@ if scdthresh is None:
         scdthresh = 0.3
     else:
         scdthresh = 1.25
-if scd_grading is None:
+if scd_tonemap is None:
     if video_transfer == 'smpte2084':
-        scd_grading = 1
+        scd_tonemap = 1
     else:
-        scd_grading = 0
+        scd_tonemap = 0
 
 default_values = {
     "cpu-used": cpu,
