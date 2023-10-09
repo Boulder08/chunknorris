@@ -277,6 +277,7 @@ def create_fgs_table():
                 grain_file.write(f'Trim({referencefile_start_frame}, {referencefile_end_frame})\n')
                 if graintable_sat < 1.0:
                     grain_file.write(f'Tweak(sat={graintable_sat})\n')
+                grain_file.write('ConvertBits(10)\n')
                 grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
             else:
                 grain_file.write('grain_frame_rate = Ceil(FrameRate())\n')
@@ -284,6 +285,7 @@ def create_fgs_table():
                 grain_file.write(f'Trim({referencefile_start_frame}, grain_end_frame)\n')
                 if graintable_sat < 1.0:
                     grain_file.write(f'Tweak(sat={graintable_sat})\n')
+                grain_file.write('ConvertBits(10)\n')
                 grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
 
         # Create the encoding command lines
@@ -538,7 +540,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
         # Create the Avisynth script for this scene
         with open(scene_script_file, "w") as scene_script:
             scene_script.write(f'Import("{encode_script}")\n')
-            scene_script.write(f"Trim({i['start']}, {i['end']})")
+            scene_script.write(f"Trim({i['start']}, {i['end']})\n")
+            scene_script.write('ConvertBits(10)')
 
         avs2yuv_command = [
             "avs2yuv64.exe",
