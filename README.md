@@ -22,7 +22,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - Python 3.10.x (or a compatible 3.x version) + support modules (see the beginning of the script)
 - (A scene change list in x264/x265 QP file format)
 - Avisynth+ (+ the SCXviD plugin if scdmethod 5 or 6)
-- avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit)
+- (avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit, just rename it as avs2yuv64.exe))
 - ffmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
@@ -97,7 +97,7 @@ python chunk_norris.py encode_script [options]
 I've found these numbers generally saturating the CPU near ~100% but not go overboard, using a Ryzen 5950X (16c/32t):
 - 1440p : 3
 - 1080p : 4
-- 720p : 6
+- 720p : 5
 
 Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 16 myself with no ill effects.
 
@@ -194,6 +194,12 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 **--downscale-scd**: Set this parameter to enable downscaling in the scene change detection script using the factor set by the parameter. Applies if --scd-method is 1, 3 or 5. Improves performance a lot without much effect on accuracy.
 - Example: --downscale-scd 2
 - Default: 4
+
+**--decode-method**: Selects between avs2yuv64 or ffmpeg as the application that loads the encoding script and pipes to aomenc. There should not be a difference between the two, but in case of any problems, it might be a good idea to change the decoder.
+- --decode-method 0 uses avs2yuv64
+- --decode-method 1 used ffmpeg
+- Example: --decode-method 0
+- Default: 1
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 

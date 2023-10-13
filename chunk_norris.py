@@ -18,7 +18,15 @@ import shutil
 import argparse
 import csv
 import ffmpeg
+import math
+import signal
 from tqdm import tqdm
+
+
+def handle_ctrl_c():
+    print("Ctrl+C received, terminating processes...")
+    executor.shutdown(wait=False)  # Terminate the ThreadPoolExecutor
+    os._exit(1)  # Exit the script forcefully
 
 
 def get_video_props(video_path):
@@ -27,11 +35,14 @@ def get_video_props(video_path):
     if video_stream:
         video_width = int(video_stream['width'])
         video_length = int(video_stream['nb_frames'])
+        video_framerate = str(video_stream['r_frame_rate'])
+        num, denom = map(int, video_framerate.split('/'))
+        video_framerate = int(math.ceil(num/denom))
         try:
             video_transfer = str(video_stream['color_transfer'])
         except:
             video_transfer = 'unknown'
-        return video_width, video_length, video_transfer
+        return video_width, video_length, video_transfer, video_framerate
     else:
         print("No video stream found in the input video.")
         return None
@@ -208,16 +219,14 @@ def pyscd(scd_script):
         "scenedetect.exe",
         "-i", scd_script,
         "-b", "moviepy",
-        "-q",
         "-d", "1",
         "-o", output_folder_name,
         "detect-adaptive",
         "-t", f"{scdthresh}",
-        "-c", "6",
-        "-f", "4",
         "-m", f"{min_chunk_length}",
         "list-scenes",
-        "-f", scene_change_csv
+        "-f", scene_change_csv,
+        "-q"
     ]
     print("Detecting scene changes using PySceneDetect.\n")
     subprocess.run(scene_change_command)
@@ -289,13 +298,22 @@ def create_fgs_table():
                 grain_file.write(f'AddBorders({int(padleft)},0,{int(padright)},0)')
 
         # Create the encoding command lines
-        avs2yuv_command_grain = [
-            "avs2yuv64.exe",
-            "-no-mt",
-            grain_script,
-            "-"
-            #        "2> nul"
-        ]
+        if decode_method == 0:
+            avs2yuv_command_grain = [
+                "avs2yuv64.exe",
+                "-no-mt",
+                grain_script,
+                "-"
+            ]
+        else:
+            avs2yuv_command_grain = [
+                "ffmpeg.exe",
+                "-loglevel", "fatal",
+                "-i", grain_script,
+                "-f", "yuv4mpegpipe",
+                "-strict", "-1",
+                "-"
+            ]
 
         aomenc_command_grain = [
             "aomenc.exe",
@@ -309,7 +327,7 @@ def create_fgs_table():
         ffmpeg_command_grain = [
             "ffmpeg.exe",
             "-i", grain_script,
-            "-loglevel", "warning",
+            "-loglevel", "fatal",
             "-c:v", "ffv1",
             "-pix_fmt", "yuv420p10le",
             output_grain_file_lossless
@@ -543,13 +561,23 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
             scene_script.write(f"Trim({i['start']}, {i['end']})\n")
             scene_script.write('ConvertBits(10)')
 
-        avs2yuv_command = [
-            "avs2yuv64.exe",
-            "-no-mt",
-            '"'+scene_script_file+'"',  # Use the Avisynth script for this scene
-            "-",
-            "2> nul"
-        ]
+        if decode_method == 0:
+            avs2yuv_command = [
+                "avs2yuv64.exe",
+                "-no-mt",
+                '"'+scene_script_file+'"',  # Use the Avisynth script for this scene
+                "-",
+                "2> nul"
+            ]
+        else:
+            avs2yuv_command = [
+                "ffmpeg.exe",
+                "-loglevel", "fatal",
+                "-i", '"'+scene_script_file+'"',
+                "-f", "yuv4mpegpipe",
+                "-strict", "-1",
+                "-"
+            ]
 
         aomenc_command = [
             "aomenc.exe",
@@ -581,8 +609,10 @@ def run_encode_command(command):
     # Wait for aomenc to finish
     aomenc_process.communicate()
 
-    return output_chunk
+    if aomenc_process.returncode != 0:
+        print("Error in aomenc processing, chunk", output_chunk)
 
+    return output_chunk
 
 parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
@@ -607,6 +637,7 @@ parser.add_argument('--scd-method', nargs='?', default=3, type=int)
 parser.add_argument('--scd-tonemap', nargs='?', type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
 parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
+parser.add_argument('--decode-method', nargs='?', default=1, type=int)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -635,12 +666,13 @@ tune = args.tune
 tune_content = args.tune_content
 arnr_strength = args.arnr_strength
 arnr_maxframes = args.arnr_maxframes
+decode_method = args.decode_method
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
 
 # Get video props from the source
-video_width, video_length, video_transfer = get_video_props(encode_script)
+video_width, video_length, video_transfer, video_framerate = get_video_props(encode_script)
 
 # Set scene change helper file to use the same path as the original source script
 scene_change_file_path = os.path.dirname(encode_script)
@@ -654,7 +686,7 @@ if scdthresh is None:
     if scd_method in (1, 2):
         scdthresh = 0.3
     else:
-        scdthresh = 1.25
+        scdthresh = 3.0
 if scd_tonemap is None:
     if video_transfer == 'smpte2084':
         scd_tonemap = 1
@@ -675,7 +707,7 @@ default_values = {
     "enable-qm": 1,
     "sb-size": 64,
     "kf-min-dist": 5,
-    "kf-max-dist": 240,
+    "kf-max-dist": video_framerate * 10,
     "disable-trellis-quant": 0,
     "enable-dnl-denoising": 0,
     "denoise-noise-level": noiselevel,
@@ -893,6 +925,7 @@ chunklist = []  # Helper list for producing the encoding and concatenation lists
 completed_chunks = []  # List of completed chunks
 
 # Run encoding commands with a set maximum of concurrent processes
+signal.signal(signal.SIGINT, handle_ctrl_c)
 encode_commands, input_files, chunklist, chunklist_dict = preprocess_chunks(encode_commands, input_files, chunklist)
 progress_bar = tqdm(total=video_length, desc="Progress", unit="frames", smoothing=0)
 
@@ -920,7 +953,7 @@ with open(input_list_txt, "w") as file:
 
 # Define the ffmpeg concatenation command
 ffmpeg_concat_command = [
-    "ffmpeg",
+    "ffmpeg.exe",
     "-loglevel", "warning",
     "-f", "concat",
     "-safe", "0",  # Allow absolute paths
