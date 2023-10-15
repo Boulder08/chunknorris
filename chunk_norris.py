@@ -547,14 +547,14 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
     chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in chunklist}
 
     for i in chunklist:
-        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
+        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
         input_files.append(output_chunk)  # Add the input file for concatenation
 
     chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
 
     for i in chunklist:
         scene_script_file = os.path.join(scripts_folder, f"scene_{i['chunk']}.avs")
-        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.webm")
+        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
         # Create the Avisynth script for this scene
         with open(scene_script_file, "w") as scene_script:
             scene_script.write(f'Import("{encode_script}")\n')
@@ -582,6 +582,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
         aomenc_command = [
             "aomenc.exe",
             "-q",
+            "--ivf",
             *encode_params,
             "--passes=1",
             f"--cq-level={q}",
