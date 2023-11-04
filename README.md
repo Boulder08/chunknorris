@@ -22,21 +22,21 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - Python 3.10.x (or a compatible 3.x version) + support modules (see the beginning of the script)
 - (A scene change list in x264/x265 QP file format)
 - Avisynth+ (+ the SCXviD plugin if scdmethod 5 or 6)
-- (avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit, just rename it as avs2yuv64.exe))
+- (avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit, just rename it to avs2yuv64.exe))
 - ffmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
 - aomenc (the lavish mod is recommended)
-- grav1synth (in case of --graintable-method 1 or 2)
+- grav1synth (in case of --graintable-method 1)
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
 
 I built some aomenc-lavish binaries for easy access, find the package here:
-https://drive.google.com/file/d/1i8L0E1TPty1tr3ugucbbyJZhgk4EOt0A/view?usp=drive_link
+https://drive.google.com/file/d/1nMmodsbCM6J_M5N0ddKRHtcyDOcaILEh/view?usp=drive_link **(latest mainline-merge including the new deltaq-mode 6)**
 
-Based on the current (as of Sept 27th, 2023) source and the Sept 25th patch by clybius (thanks!)
+Based on the current (as of November 4th, 2023) source by clybius (thanks!)
 
-The source: https://github.com/Clybius/aom-av1-lavish/tree/Endless_Merging, the patch can be found from the AV1 Discord channel.
+The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
 
 
@@ -95,11 +95,11 @@ python chunk_norris.py encode_script [options]
 ## Some ideas for number of parallel encodes
 
 I've found these numbers generally saturating the CPU near ~100% but not go overboard, using a Ryzen 5950X (16c/32t):
-- 1440p : 3
-- 1080p : 4
-- 720p : 5
+- 1440p : 4
+- 1080p : 5
+- 720p : 6
 
-Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 16 myself with no ill effects.
+Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 8 myself with no ill effects.
 
 ---
 
@@ -129,7 +129,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--max-parallel-encodes**: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory.
 - Example: --max-parallel-encodes 8
-- Default: 6
+- Default: 4
 
 **--noiselevel**: Defines the strength of the internal Film Grain Synthesis. Disabled if a grain table is used.
 - Example: --noiselevel 20
@@ -143,9 +143,17 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --tile-columns 1 --tile-rows 1
 - Default: None for both
 
-**-arnr-strength** and **--arnr-maxframes**: Define the parameters for internal alt-ref frame denoising.
+**--arnr-strength** and **--arnr-maxframes**: Define the parameters for internal alt-ref frame denoising.
 - Example: --arnr-strength 3 --arnr-maxframes 9
-- Default: 1 for arnr-strength, 7 for arnr-maxframes
+- Default: 2 for arnr-strength, 7 for arnr-maxframes
+
+**--tpl-strength**: Defines the multiplier (percentage) for temporal filtering (arnr-strength) in the encoder, 100 being equal to "as is".
+- Example: --tpl-strength 50
+- Default: None (100)
+
+**--max-reference-frames**: Defines the maximum amount of reference frames the encoder may use. For live action content, a lower amount like 4-5 is enough; for animated content, using 7 could be beneficial.
+- Example: --max-reference-frames 4
+- Default: 5
 
 **--tune**: Defines the tuning to use in aomenc. Use 'ssim' or 'omni'.
 - Example: --tune omni
@@ -154,6 +162,15 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 **--tune-content**: Defines the content-based (psy) tuning to use in aomenc. With the lavish mod, 'psy' is recommended.
 - Example: --tune-content default
 - Default: psy
+
+**--luma-bias**, **--luma-bias-strength** and **--luma-bias-midpoint**: Define the parameters for the luma bias modification in aomenc-lavish. See https://www.desmos.com/calculator/nwxoa44sie (lower y means less compression)
+- Example: --luma-bias 10
+- Default: None
+
+**--deltaq-mode**: Defines the deltaq-mode parameter. In aomenc-lavish, mode 6 is highly recommended for both SDR and HDR encodes (the effect is close to modes 1+5 with dark bias for SDR and bright bias for HDR). With vanilla aomenc, use 1 for SDR and 5 for HDR.
+**If you use deltaq-mode 6, make sure you feed 10-bit data into the encoder as the bias table is not yet normalized depending on the source bitdepth.**
+- Example: --deltaq-mode 1
+- Default: None
 
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
 - --graintable-method 0 skips creation.
@@ -168,6 +185,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Default: 0
 
 **--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
+The lower resolution tables often contain a little more, or sharper grain compared to the higher resolution counterparts.
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
 
@@ -187,17 +205,17 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --scd-tonemap 0
 - Default: 0 for SDR, 1 for HDR sources
 
-**--scdthresh**: Defines the threshold for scene change detection in ffmpeg. Lower values mean more scene changes detected, but also more false detections.
-- Example: --ffmpeg-scd 0.4
-- Default: 0.3 for --scd-method 1 and 2, 1.25 for --scd-method 3 and 4
+**--scdthresh**: Defines the threshold for scene change detection in ffmpeg or PySceneDetect. Lower values mean more scene changes detected, but also more false detections.
+- Example: --scdthresh 0.4
+- Default: 0.3 for --scd-method 1 and 2, 3.0 for --scd-method 3 and 4
 
 **--downscale-scd**: Set this parameter to enable downscaling in the scene change detection script using the factor set by the parameter. Applies if --scd-method is 1, 3 or 5. Improves performance a lot without much effect on accuracy.
 - Example: --downscale-scd 2
 - Default: 4
 
 **--decode-method**: Selects between avs2yuv64 or ffmpeg as the application that loads the encoding script and pipes to aomenc. There should not be a difference between the two, but in case of any problems, it might be a good idea to change the decoder.
-- --decode-method 0 uses avs2yuv64
-- --decode-method 1 used ffmpeg
+- --decode-method 0 uses avs2yuv64.
+- --decode-method 1 used ffmpeg.
 - Example: --decode-method 0
 - Default: 1
 

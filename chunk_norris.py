@@ -615,6 +615,7 @@ def run_encode_command(command):
 
     return output_chunk
 
+
 parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
@@ -622,15 +623,21 @@ parser.add_argument('--cpu', nargs='?', default=3, type=int)
 parser.add_argument('--threads', nargs='?', default=8, type=int)
 parser.add_argument('--q', nargs='?', default=14, type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
-parser.add_argument('--max-parallel-encodes', nargs='?', default=6, type=int)
+parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
 parser.add_argument('--sharpness', nargs='?', default=2, type=int)
 parser.add_argument('--tile-columns', nargs='?', type=int)
 parser.add_argument('--tile-rows', nargs='?', type=int)
-parser.add_argument('--arnr-strength', default=1, nargs='?', type=int)
+parser.add_argument('--arnr-strength', default=2, nargs='?', type=int)
 parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
+parser.add_argument('--tpl-strength', nargs='?', type=int)
+parser.add_argument('--max-reference-frames', default=4, nargs='?', type=int)
 parser.add_argument('--tune', nargs='?', default='ssim', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
+parser.add_argument('--luma-bias', nargs='?', type=int)
+parser.add_argument('--luma-bias-strength', nargs='?', type=int)
+parser.add_argument('--luma-bias-midpoint', nargs='?', type=int)
+parser.add_argument('--deltaq-mode', nargs='?', type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', default=0, type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
@@ -668,6 +675,12 @@ tune_content = args.tune_content
 arnr_strength = args.arnr_strength
 arnr_maxframes = args.arnr_maxframes
 decode_method = args.decode_method
+max_reference_frames = args.max_reference_frames
+luma_bias = args.luma_bias
+luma_bias_strength = args.luma_bias_strength
+luma_bias_midpoint = args.luma_bias_midpoint
+deltaq_mode = args.deltaq_mode
+tplstrength = args.tpl_strength
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
@@ -717,10 +730,12 @@ default_values = {
     "tile-rows": tile_rows,
     "sharpness": sharpness,
     "enable-cdef": 0,
-    "enable-fwd-kf": 1,
+    "enable-fwd-kf": 0,
     "arnr-strength": arnr_strength,
     "arnr-maxframes": arnr_maxframes,
     "quant-b-adapt": 1,
+    "enable-global-motion": 0,
+    "max-reference-frames": max_reference_frames,
 }
 
 # Define presets as dictionaries of encoder parameters
@@ -739,14 +754,18 @@ presets = {
         "color-primaries": "bt709",
         "transfer-characteristics": "bt709",
         "matrix-coefficients": "bt709",
+        "deltaq-mode": 6,
         "tile-columns": 0,
         "tile-rows": 0,
         "max-partition-size": 32,
         "ssim-rd-mult": 125,
-        "luma-bias": 33,
-        "luma-bias-midpoint": 66,
-        "luma-bias-strength": 20,
+        "luma-bias": 15,
+        "luma-bias-midpoint": 40,
+        "luma-bias-strength": 10,
         "max-reference-frames": 5,
+        "arnr-strength": 6,
+        "arnr-maxframes": 15,
+        "tpl-strength": 8,
         # Add more parameters as needed
     },
     "1080p": {
@@ -763,14 +782,18 @@ presets = {
         "color-primaries": "bt709",
         "transfer-characteristics": "bt709",
         "matrix-coefficients": "bt709",
+        "deltaq-mode": 6,
         "tile-columns": 1,
         "tile-rows": 0,
         "max-partition-size": 32,
         "ssim-rd-mult": 125,
-        "luma-bias": 33,
-        "luma-bias-midpoint": 66,
-        "luma-bias-strength": 20,
+        "luma-bias": 15,
+        "luma-bias-midpoint": 40,
+        "luma-bias-strength": 10,
         "max-reference-frames": 4,
+        "arnr-strength": 6,
+        "arnr-maxframes": 15,
+        "tpl-strength": 8,
         # Add more parameters as needed
     },
     "1080p-hdr": {
@@ -788,15 +811,18 @@ presets = {
         "color-primaries": "bt2020",
         "transfer-characteristics": "smpte2084",
         "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 5,
+        "deltaq-mode": 6,
         "tile-columns": 1,
         "tile-rows": 0,
         "max-partition-size": 32,
         "ssim-rd-mult": 125,
-        "luma-bias": 33,
-        "luma-bias-midpoint": 66,
-        "luma-bias-strength": 20,
+        "luma-bias": 15,
+        "luma-bias-midpoint": 40,
+        "luma-bias-strength": 10,
         "max-reference-frames": 4,
+        "arnr-strength": 6,
+        "arnr-maxframes": 15,
+        "tpl-strength": 8,
         # Add more parameters as needed
     },
     "1440p-hdr": {
@@ -814,15 +840,18 @@ presets = {
         "color-primaries": "bt2020",
         "transfer-characteristics": "smpte2084",
         "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 5,
+        "deltaq-mode": 6,
         "tile-columns": 1,
         "tile-rows": 1,
         "max-partition-size": 64,
         "ssim-rd-mult": 125,
-        "luma-bias": 33,
-        "luma-bias-midpoint": 66,
-        "luma-bias-strength": 20,
+        "luma-bias": 15,
+        "luma-bias-midpoint": 40,
+        "luma-bias-strength": 10,
         "max-reference-frames": 4,
+        "arnr-strength": 6,
+        "arnr-maxframes": 15,
+        "tpl-strength": 8,
         # Add more parameters as needed
     },
     "2160p-hdr": {
@@ -840,15 +869,18 @@ presets = {
         "color-primaries": "bt2020",
         "transfer-characteristics": "smpte2084",
         "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 5,
+        "deltaq-mode": 6,
         "tile-columns": 1,
         "tile-rows": 1,
         "max-partition-size": 64,
         "ssim-rd-mult": 125,
-        "luma-bias": 33,
-        "luma-bias-midpoint": 66,
-        "luma-bias-strength": 20,
+        "luma-bias": 15,
+        "luma-bias-midpoint": 40,
+        "luma-bias-strength": 10,
         "max-reference-frames": 4,
+        "arnr-strength": 6,
+        "arnr-maxframes": 15,
+        "tpl-strength": 8,
         # Add more parameters as needed
     },
     # Add more presets as needed
@@ -942,7 +974,7 @@ with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
 
 # Wait for all encoding processes to finish before concatenating
 progress_bar.close()
-print("Encoding for all scenes completed.")
+print("Encoding for all scenes completed.\n")
 
 # Create a list file for input files
 input_list_txt = os.path.join(chunks_folder, "input_list.txt")
@@ -969,6 +1001,8 @@ ffmpeg_concat_command = [
 # Print the ffmpeg concatenation command for debugging
 # print("Concatenation Command (ffmpeg):")
 # print(" ".join(ffmpeg_concat_command))
+
+print("Concatenating chunks using ffmpeg.\n")
 
 # Run the ffmpeg concatenation command
 subprocess.run(ffmpeg_concat_command)
