@@ -32,9 +32,9 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
 
 I built some aomenc-lavish binaries for easy access, find the package here:
-https://drive.google.com/file/d/1nMmodsbCM6J_M5N0ddKRHtcyDOcaILEh/view?usp=drive_link **(latest mainline-merge including the new deltaq-mode 6)**
+https://drive.google.com/file/d/1h8K0_0P730firYb8cmM0_jCARYn8v53u/view?usp=drive_link **(latest mainline-merge including the new deltaq-mode 6)**
 
-Based on the current (as of November 4th, 2023) source by clybius (thanks!)
+Based on the current (as of November 19th, 2023) source by clybius (thanks!)
 
 The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
