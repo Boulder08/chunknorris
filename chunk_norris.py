@@ -472,6 +472,51 @@ def scene_change_detection(scd_script):
     return scene_changes
 
 
+def adjust_chunkdata(chunkdata_list, credits_start_frame):
+    adjusted_chunkdata_list = []
+
+    last_frame = chunkdata_list[-1]['end']
+
+    for i, chunkdata in enumerate(chunkdata_list):
+        if chunkdata['start'] <= credits_start_frame <= chunkdata['end']:
+            # Update the end frame of the chunk where credits start
+            adjusted_length = credits_start_frame - chunkdata['start']
+            chunkdata_list[i]['end'] = credits_start_frame - 1
+            chunkdata_list[i]['length'] = adjusted_length
+            break
+        elif i == len(chunkdata_list) - 1 and credits_start_frame == chunkdata['end'] + 1:
+            # Credits start at the end of the last chunk
+            adjusted_chunk = {
+                'chunk': chunkdata['chunk'],
+                'length': credits_start_frame - chunkdata['start'],
+                'start': chunkdata['start'],
+                'end': credits_start_frame - 1,
+                'credits': 0
+            }
+            adjusted_chunkdata_list.append(adjusted_chunk)
+            break
+
+    # Remove chunks that start after the credits start frame
+    chunkdata_list = [chunkdata for chunkdata in chunkdata_list if chunkdata['start'] <= credits_start_frame]
+
+    # Create a new chunk for the credits
+    credits_chunk = {
+        'chunk': len(chunkdata_list) + 1,
+        'length': last_frame - credits_start_frame + 1,
+        'start': credits_start_frame,
+        'end': last_frame,
+        'credits': 1
+    }
+
+    # Append the adjusted chunks to the list
+    adjusted_chunkdata_list = chunkdata_list + [credits_chunk]
+
+    # Update the length of each chunk in the adjusted_chunkdata_list
+    for chunkdata in adjusted_chunkdata_list:
+        chunkdata['length'] = chunkdata['end'] - chunkdata['start'] + 1
+
+    return adjusted_chunkdata_list
+
 def preprocess_chunks(encode_commands, input_files, chunklist):
     if scd_method in (0, 1, 2, 5, 6):
         chunk_number = 1
@@ -508,7 +553,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
             # chunk_length = 999999 if chunk_length < 0 else chunk_length
 
             chunkdata = {
-                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
+                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame, 'credits': 0
             }
             chunklist.append(chunkdata)
 
@@ -540,10 +585,14 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 end_frame = int(row[4]) - 1  # Fifth column
                 chunk_length = int(row[7])  # Eighth column
             chunkdata = {
-                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame
+                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame, 'credits': 0
             }
             chunklist.append(chunkdata)
 
+    if credits_start_frame:
+        chunklist = adjust_chunkdata(chunklist, credits_start_frame)
+
+    # print (chunklist)
     chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in chunklist}
 
     for i in chunklist:
@@ -559,7 +608,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
         with open(scene_script_file, "w") as scene_script:
             scene_script.write(f'Import("{encode_script}")\n')
             scene_script.write(f"Trim({i['start']}, {i['end']})\n")
-            scene_script.write('ConvertBits(10)')
+            scene_script.write('ConvertBits(10)') # workaround to aomenc bug with 8-bit input and film grain table
 
         if decode_method == 0:
             avs2yuv_command = [
@@ -579,16 +628,30 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 "-"
             ]
 
-        aomenc_command = [
-            "aomenc.exe",
-            "-q",
-            "--ivf",
-            *encode_params,
-            "--passes=1",
-            f"--cq-level={q}",
-            "-o", '"'+output_chunk+'"',
-            "-"
-        ]
+        if i['credits'] == 0:
+            aomenc_command = [
+                "aomenc.exe",
+                "-q",
+                "--ivf",
+                f"--cpu-used={cpu}",
+                *encode_params,
+                "--passes=1",
+                f"--cq-level={q}",
+                "-o", '"'+output_chunk+'"',
+                "-"
+            ]
+        else:
+            aomenc_command = [
+                "aomenc.exe",
+                "-q",
+                "--ivf",
+                f"--cpu-used={credits_cpu}",
+                *encode_params,
+                "--passes=1",
+                f"--cq-level={credits_q}",
+                "-o", '"' + output_chunk + '"',
+                "-"
+            ]
 
         encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
     return encode_commands, input_files, chunklist, chunklist_dict
@@ -647,6 +710,9 @@ parser.add_argument('--scd-tonemap', nargs='?', type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
 parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
 parser.add_argument('--decode-method', nargs='?', default=1, type=int)
+parser.add_argument('--credits-start-frame', nargs='?', type=int)
+parser.add_argument('--credits-q', nargs='?', default=32, type=int)
+parser.add_argument('--credits-cpu', nargs='?', type=int)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -682,12 +748,19 @@ luma_bias_strength = args.luma_bias_strength
 luma_bias_midpoint = args.luma_bias_midpoint
 deltaq_mode = args.deltaq_mode
 tplstrength = args.tpl_strength
+credits_start_frame = args.credits_start_frame
+credits_q = args.credits_q
+credits_cpu = args.credits_cpu
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
 
 # Get video props from the source
 video_width, video_length, video_transfer, video_framerate = get_video_props(encode_script)
+
+if credits_start_frame >= video_length - 1:
+    print("The credits cannot start at or after the end of video.\n")
+    sys.exit(1)
 
 # Set scene change helper file to use the same path as the original source script
 scene_change_file_path = os.path.dirname(encode_script)
@@ -707,9 +780,10 @@ if scd_tonemap is None:
         scd_tonemap = 1
     else:
         scd_tonemap = 0
+if credits_cpu is None:
+    credits_cpu = cpu + 1
 
 default_values = {
-    "cpu-used": cpu,
     "threads": threads,
     "bit-depth": 10,
     "end-usage": "q",

@@ -219,6 +219,18 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Example: --decode-method 0
 - Default: 1
 
+**--credits-start-frame**: Defines the starting frame of end credits to allow encoding them at a lower Q for increased space savings. Currently, the script will then assume that everything until the end of the video is credits and encodes them as a separate chunk.
+- Example: --credits-start-frame 75120
+- Default: None
+
+**--credits-q**: Defines the Q value to use for encoding the credits.
+- Example: --credits-q 36
+- Default: 32
+
+**--credits-cpu**: Defines the '--cpu-used' parameter for the credits section.
+- Example: --credits-cpu 6
+- Default: cpu + 1
+
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
 ---
