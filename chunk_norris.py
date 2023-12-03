@@ -758,7 +758,7 @@ encode_script = os.path.abspath(encode_script)
 # Get video props from the source
 video_width, video_length, video_transfer, video_framerate = get_video_props(encode_script)
 
-if credits_start_frame >= video_length - 1:
+if credits_start_frame is not None and credits_start_frame >= video_length - 1:
     print("The credits cannot start at or after the end of video.\n")
     sys.exit(1)
 
