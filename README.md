@@ -125,7 +125,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead in aomenc and much better performance in svt-av1.
 - Example: --threads 4
-- Default: 8
+- Default: 6 for aomenc, 2 for svt-av1
 
 **--q**: Defines a Q value the encoder will use. In aomenc, the script does a one-pass encode in Q mode, which is the closest to constant quality with a single pass. In svt-av1, CRF mode is used.
 - Example: --q 16
