@@ -1,6 +1,6 @@
 # Chunk Norris
 
-A Python script for chunked encoding using the aomenc CLI encoder
+A Python script for chunked encoding using an AV1 CLI encoder
 
 
 ---
@@ -9,7 +9,7 @@ A Python script for chunked encoding using the aomenc CLI encoder
 
 ## Overview
 
-**Chunk Norris** is a simple Python script designed for chunked encoding using the **aomenc CLI encoder**. This script allows you to process large video files more efficiently by dividing them into smaller, manageable chunks for parallel encoding. It also offers the flexibility to set various encoding parameters and presets to suit your specific needs.
+**Chunk Norris** is a simple Python script designed for chunked encoding of AV1 streams. This script allows you to process large video files more efficiently by dividing them into smaller, manageable chunks for parallel encoding. It also offers the flexibility to set various encoding parameters and presets to suit your specific needs.
 
 ---
 
@@ -26,7 +26,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - ffmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
-- aomenc (the lavish mod is recommended)
+- aomenc (the lavish mod is recommended) / svt-av1 (see below for compatible binaries)
 - grav1synth (in case of --graintable-method 1)
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
@@ -38,6 +38,10 @@ Based on the current (as of November 19th, 2023) source by clybius (thanks!)
 
 The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
+
+**SVT-AV1 binaries to use with this script**: https://drive.google.com/file/d/1HheHLCXxc91T_K6gcTNtcN1JNRn-xN7i/view?usp=drive_link
+- includes the var-deltaq optimizations (https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2105#note_1666136918), choose one you wish to apply and rename the binary to svtav1encapp.exe
+The source: https://github.com/BlueSwordM/SVT-AV1 (thanks!)
 
 
 ---
@@ -94,12 +98,12 @@ python chunk_norris.py encode_script [options]
 
 ## Some ideas for number of parallel encodes
 
-I've found these numbers generally saturating the CPU near ~100% but not go overboard, using a Ryzen 5950X (16c/32t):
-- 1440p : 4
-- 1080p : 5
-- 720p : 6
+I've found these numbers generally saturating the CPU near ~100% on aomenc but not go overboard, using a Ryzen 5950X (16c/32t):
+- 1440p : 6
+- 1080p : 8
+- 720p : 10
 
-Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 8 myself with no ill effects.
+Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 8 myself with no ill effects on aomenc, svt-av1 uses threads much more so very system- and source dependent!
 
 ---
 
@@ -107,19 +111,23 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 ## Options
 
+**--encoder**: Chooses the encoder to use. Currently available: aomenc, svt
+- Example: --encoder aom
+- Default: svt
+
 **--preset**: Choose a preset defined in the script. You can add your own and change the existing ones.
 - Example: --preset 720p
 - Default: 1080p
 
-**--cpu**: Defines the '--cpu-used' parameter in aomenc. Lower is better, but also slower.
+**--cpu**: Defines the '--cpu-used' parameter in aomenc, or '--preset' in svt-av1. Lower is better, but also slower.
 - Example: --cpu 6
 - Default: 3
 
-**--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead.
+**--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead in aomenc and much better performance in svt-av1.
 - Example: --threads 4
 - Default: 8
 
-**--q**: Defines a Q value the encoder will use. It does a one-pass encode in Q mode, which is the closest to constant quality with a single pass.
+**--q**: Defines a Q value the encoder will use. In aomenc, the script does a one-pass encode in Q mode, which is the closest to constant quality with a single pass. In svt-av1, CRF mode is used.
 - Example: --q 16
 - Default: 14
 
@@ -139,19 +147,19 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --sharpness 3
 - Default: 2
 
-**--tile-columns** and **--tile-rows**: Define the corresponding parameters for splitting the encoding (and decoding) into multiple tiles in aomenc.
+**--tile-columns** and **--tile-rows**: Define the corresponding parameters for splitting the encoding (and decoding) into multiple tiles in aomenc. Svt-av1 optimizes tiles automatically based on the resolution.
 - Example: --tile-columns 1 --tile-rows 1
 - Default: None for both
 
-**--arnr-strength** and **--arnr-maxframes**: Define the parameters for internal alt-ref frame denoising.
+**--arnr-strength** and **--arnr-maxframes**: Define the parameters for internal alt-ref frame denoising in aomenc.
 - Example: --arnr-strength 3 --arnr-maxframes 9
 - Default: 2 for arnr-strength, 7 for arnr-maxframes
 
-**--tpl-strength**: Defines the multiplier (percentage) for temporal filtering (arnr-strength) in the encoder, 100 being equal to "as is".
+**--tpl-strength**: Defines the multiplier (percentage) for temporal filtering (arnr-strength) in aomenc, 100 being equal to "as is".
 - Example: --tpl-strength 50
 - Default: None (100)
 
-**--max-reference-frames**: Defines the maximum amount of reference frames the encoder may use. For live action content, a lower amount like 4-5 is enough; for animated content, using 7 could be beneficial.
+**--max-reference-frames**: Defines the maximum amount of reference frames aomenc may use. For live action content, a lower amount like 4-5 is enough; for animated content, using 7 could be beneficial.
 - Example: --max-reference-frames 4
 - Default: 5
 
@@ -167,7 +175,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --luma-bias 10
 - Default: None
 
-**--deltaq-mode**: Defines the deltaq-mode parameter. In aomenc-lavish, mode 6 is highly recommended for both SDR and HDR encodes (the effect is close to modes 1+5 with dark bias for SDR and bright bias for HDR). With vanilla aomenc, use 1 for SDR and 5 for HDR.
+**--deltaq-mode**: Defines the deltaq-mode parameter in aomenc. In aomenc-lavish, mode 6 is highly recommended for both SDR and HDR encodes (the effect is close to modes 1+5 with dark bias for SDR and bright bias for HDR). With vanilla aomenc, use 1 for SDR and 5 for HDR.
 **If you use deltaq-mode 6, make sure you feed 10-bit data into the encoder as the bias table is not yet normalized depending on the source bitdepth.**
 - Example: --deltaq-mode 1
 - Default: None
@@ -182,7 +190,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--graintable-sat**: Defines the level of saturation to have in the graintable analysis clip. The recommended range is 0..1 where 0 means black-and-white and 1 does nothing. Uses the Avisynth+ built-in filter "Tweak".
 - Example: --graintable-sat 0.2
-- Default: 0
+- Default: 0 for aomenc, 1.0 for svt-av1
 
 **--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
 The lower resolution tables often contain a little more, or sharper grain compared to the higher resolution counterparts.
@@ -231,6 +239,8 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Example: --credits-cpu 6
 - Default: cpu + 1
 
+**--mastering** and **--cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md
+
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
 ---
@@ -259,4 +269,4 @@ Here's an example of how to use Chunk Norris:
 python chunk_norris.py my_video.avs --preset "720p" --q 18 --max-parallel-encodes 4 --scd-method 3
 ```
 
-This command will encode the video specified in my_video.avs using the '720p' preset, a quality level of 18, and a maximum of 4 parallel encoding processes. It uses PySceneDetect for scene change detection.
+This command will use svt-av1 to encode the video specified in my_video.avs using the '720p' preset, a quality level of 18, and a maximum of 4 parallel encoding processes. It uses PySceneDetect for scene change detection.

@@ -232,7 +232,7 @@ def pyscd(scd_script):
     subprocess.run(scene_change_command)
 
 
-def create_fgs_table():
+def create_fgs_table(encode_params):
     # Create the grain table only if it doesn't exist already
     if os.path.exists(output_grain_table) is False:
         grain_script = os.path.join(scripts_folder, f"grainscript.avs")
@@ -315,14 +315,27 @@ def create_fgs_table():
                 "-"
             ]
 
-        aomenc_command_grain = [
-            "aomenc.exe",
-            *encode_params,
-            "--passes=1",
-            f"--cq-level={q}",
-            "-o", output_grain_file_encoded,
-            "-"
-        ]
+        if encoder == 'svt':
+            encode_params_grain = [x.replace(f'--lp {threads}', '--lp 0') for x in encode_params]
+            aomenc_command_grain = [
+                "svtav1encapp.exe",
+                *encode_params_grain,
+                f"--preset {cpu}",
+                f"--crf {q}",
+                "-b", output_grain_file_encoded,
+                "-i -"
+            ]
+        else:
+            aomenc_command_grain = [
+                "aomenc.exe",
+                "--ivf",
+                *encode_params,
+                "--passes=1",
+                f"--cpu-used={cpu}",
+                f"--cq-level={q}",
+                "-o", output_grain_file_encoded,
+                "-"
+            ]
 
         ffmpeg_command_grain = [
             "ffmpeg.exe",
@@ -342,6 +355,9 @@ def create_fgs_table():
             output_grain_file_encoded
         ]
 
+        # print (avs2yuv_command_grain, aomenc_command_grain)
+        avs2yuv_command_grain = ' '.join(avs2yuv_command_grain)
+        aomenc_command_grain = ' '.join(aomenc_command_grain)
         print("Encoding the FGS analysis AV1 file.\n")
         avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
         aomenc_grain_process = subprocess.Popen(aomenc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
@@ -517,6 +533,7 @@ def adjust_chunkdata(chunkdata_list, credits_start_frame):
 
     return adjusted_chunkdata_list
 
+
 def preprocess_chunks(encode_commands, input_files, chunklist):
     if scd_method in (0, 1, 2, 5, 6):
         chunk_number = 1
@@ -628,30 +645,52 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 "-"
             ]
 
-        if i['credits'] == 0:
-            aomenc_command = [
-                "aomenc.exe",
-                "-q",
-                "--ivf",
-                f"--cpu-used={cpu}",
-                *encode_params,
-                "--passes=1",
-                f"--cq-level={q}",
-                "-o", '"'+output_chunk+'"',
-                "-"
-            ]
+        if encoder == 'svt':
+            if i['credits'] == 0:
+                aomenc_command = [
+                    "svtav1encapp.exe",
+                    *encode_params,
+                    f"--preset {cpu}",
+                    f"--crf {q}",
+                    "-b", '"'+output_chunk+'"',
+                    "-i -",
+                    "2> nul"
+                ]
+            else:
+                aomenc_command = [
+                    "svtav1encapp.exe",
+                    *encode_params,
+                    f"--preset {credits_cpu}",
+                    f"--crf {credits_q}",
+                    "-b", '"'+output_chunk+'"',
+                    "-i -",
+                    "2> nul"
+                ]
         else:
-            aomenc_command = [
-                "aomenc.exe",
-                "-q",
-                "--ivf",
-                f"--cpu-used={credits_cpu}",
-                *encode_params,
-                "--passes=1",
-                f"--cq-level={credits_q}",
-                "-o", '"' + output_chunk + '"',
-                "-"
-            ]
+            if i['credits'] == 0:
+                aomenc_command = [
+                    "aomenc.exe",
+                    "-q",
+                    "--ivf",
+                    f"--cpu-used={cpu}",
+                    *encode_params,
+                    "--passes=1",
+                    f"--cq-level={q}",
+                    "-o", '"'+output_chunk+'"',
+                    "-"
+                ]
+            else:
+                aomenc_command = [
+                    "aomenc.exe",
+                    "-q",
+                    "--ivf",
+                    f"--cpu-used={credits_cpu}",
+                    *encode_params,
+                    "--passes=1",
+                    f"--cq-level={credits_q}",
+                    "-o", '"' + output_chunk + '"',
+                    "-"
+                ]
 
         encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
     return encode_commands, input_files, chunklist, chunklist_dict
@@ -663,10 +702,10 @@ def run_encode_command(command):
     avs2yuv_command = " ".join(avs2yuv_command)
     aomenc_command = " ".join(aomenc_command)
 
-    # Print the aomenc encoding command for debugging
+    # Print the encoding command for debugging
     # print(f"\naomenc command: {aomenc_command}")
 
-    # Execute avs2yuv and pipe the output to aomenc
+    # Execute avs2yuv and pipe the output to the encoder
     avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
     aomenc_process = subprocess.Popen(aomenc_command, stdin=avs2yuv_process.stdout, shell=True)
 
@@ -682,9 +721,10 @@ def run_encode_command(command):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
+parser.add_argument('--encoder', nargs='?', default='svt', type=str)
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
 parser.add_argument('--cpu', nargs='?', default=3, type=int)
-parser.add_argument('--threads', nargs='?', default=8, type=int)
+parser.add_argument('--threads', nargs='?', type=int)
 parser.add_argument('--q', nargs='?', default=14, type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
@@ -696,14 +736,14 @@ parser.add_argument('--arnr-strength', default=2, nargs='?', type=int)
 parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
 parser.add_argument('--tpl-strength', nargs='?', type=int)
 parser.add_argument('--max-reference-frames', default=4, nargs='?', type=int)
-parser.add_argument('--tune', nargs='?', default='ssim', type=str)
+parser.add_argument('--tune', nargs='?', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
 parser.add_argument('--luma-bias', nargs='?', type=int)
 parser.add_argument('--luma-bias-strength', nargs='?', type=int)
 parser.add_argument('--luma-bias-midpoint', nargs='?', type=int)
 parser.add_argument('--deltaq-mode', nargs='?', type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
-parser.add_argument('--graintable-sat', nargs='?', default=0, type=float)
+parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
 parser.add_argument('--scd-method', nargs='?', default=3, type=int)
 parser.add_argument('--scd-tonemap', nargs='?', type=int)
@@ -713,6 +753,8 @@ parser.add_argument('--decode-method', nargs='?', default=1, type=int)
 parser.add_argument('--credits-start-frame', nargs='?', type=int)
 parser.add_argument('--credits-q', nargs='?', default=32, type=int)
 parser.add_argument('--credits-cpu', nargs='?', type=int)
+parser.add_argument('--mastering', nargs='?', type=str)
+parser.add_argument('--cll', nargs='?', type=str)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -720,6 +762,7 @@ base_working_folder = "F:\\Temp\\Captures\\encodes"
 # Command-line arguments
 args = parser.parse_args()
 encode_script = args.encode_script
+encoder = args.encoder
 preset = args.preset
 q = args.q
 min_chunk_length = args.min_chunk_length
@@ -751,6 +794,8 @@ tplstrength = args.tpl_strength
 credits_start_frame = args.credits_start_frame
 credits_q = args.credits_q
 credits_cpu = args.credits_cpu
+mastering = args.mastering
+cll = args.cll
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
@@ -758,7 +803,7 @@ encode_script = os.path.abspath(encode_script)
 # Get video props from the source
 video_width, video_length, video_transfer, video_framerate = get_video_props(encode_script)
 
-if credits_start_frame >= video_length - 1:
+if credits_start_frame is not None and credits_start_frame >= video_length - 1:
     print("The credits cannot start at or after the end of video.\n")
     sys.exit(1)
 
@@ -782,199 +827,273 @@ if scd_tonemap is None:
         scd_tonemap = 0
 if credits_cpu is None:
     credits_cpu = cpu + 1
+if threads is None:
+    if encoder == 'svt':
+        threads = 2
+    else:
+        threads = 6
+if graintable_sat is None:
+    if encoder == 'svt':
+        graintable_sat = 1.0
+    else:
+        graintable_sat = 0
 
-default_values = {
-    "threads": threads,
-    "bit-depth": 10,
-    "end-usage": "q",
-    "aq-mode": 0,
-    "deltaq-mode": 1,
-    "enable-chroma-deltaq": 1,
-    "tune-content": tune_content,
-    "tune": tune,
-    "lag-in-frames": 64,
-    "enable-qm": 1,
-    "sb-size": "dynamic",
-    "kf-min-dist": 5,
-    "kf-max-dist": video_framerate * 10,
-    "disable-trellis-quant": 0,
-    "enable-dnl-denoising": 0,
-    "denoise-noise-level": noiselevel,
-    "enable-keyframe-filtering": 1,
-    "tile-columns": tile_columns,
-    "tile-rows": tile_rows,
-    "sharpness": sharpness,
-    "enable-cdef": 0,
-    "enable-fwd-kf": 0,
-    "arnr-strength": arnr_strength,
-    "arnr-maxframes": arnr_maxframes,
-    "quant-b-adapt": 1,
-    "enable-global-motion": 0,
-    "max-reference-frames": max_reference_frames,
-}
+if encoder == 'svt':
+    default_values = {
+        "tune": 0,
+        "enable-qm": 1,
+        "qm-min": 5,
+        "qm-max": 9,
+        "keyint": "10s",
+        "enable-cdef": 0,
+        "enable-tf": 0,
+        "film-grain": noiselevel,
+        "film-grain-denoise": 0,
+        "lp": threads,
+        "chroma-u-dc-qindex-offset": -q + 2,
+        "chroma-u-ac-qindex-offset": -q + 2,
+        "chroma-v-dc-qindex-offset": -q + 2,
+        "chroma-v-ac-qindex-offset": -q + 2,
+        "key-frame-chroma-qindex-offset": -q + 2,
+    }
+    presets = {
+        "720p": {
+            "color-primaries": 1,
+            "transfer-characteristics": 1,
+            "matrix-coefficients": 1,
+            # Add more parameters as needed
+        },
+        "1080p": {
+            "color-primaries": 1,
+            "transfer-characteristics": 1,
+            "matrix-coefficients": 1,
+            # Add more parameters as needed
+        },
+        "1080p-hdr": {
+            "color-primaries": 9,
+            "transfer-characteristics": 16,
+            "matrix-coefficients": 9,
+            "chroma-sample-position": 2,
+            "mastering-display": mastering,
+            "content-light": cll,
+            "enable-hdr": 1,
+            # Add more parameters as needed
+        },
+        "1440p-hdr": {
+            "color-primaries": 9,
+            "transfer-characteristics": 16,
+            "matrix-coefficients": 9,
+            "chroma-sample-position": 2,
+            "mastering-display": mastering,
+            "content-light": cll,
+            "enable-hdr": 1,
+            # Add more parameters as needed
+        },
+        "2160p-hdr": {
+            "color-primaries": 9,
+            "transfer-characteristics": 16,
+            "matrix-coefficients": 9,
+            "chroma-sample-position": 2,
+            "mastering-display": mastering,
+            "content-light": cll,
+            "enable-hdr": 1,
+            # Add more parameters as needed
+        },
+        # Add more presets as needed
+    }.get(preset, {})
+else:
+    default_values = {
+        "threads": threads,
+        "bit-depth": 10,
+        "end-usage": "q",
+        "aq-mode": 0,
+        "deltaq-mode": 1,
+        "enable-chroma-deltaq": 1,
+        "tune-content": tune_content,
+        "tune": "ssim",
+        "lag-in-frames": 64,
+        "enable-qm": 1,
+        "sb-size": "dynamic",
+        "kf-min-dist": 5,
+        "kf-max-dist": video_framerate * 10,
+        "disable-trellis-quant": 0,
+        "enable-dnl-denoising": 0,
+        "denoise-noise-level": noiselevel,
+        "enable-keyframe-filtering": 1,
+        "tile-columns": tile_columns,
+        "tile-rows": tile_rows,
+        "sharpness": sharpness,
+        "enable-cdef": 0,
+        "enable-fwd-kf": 0,
+        "arnr-strength": arnr_strength,
+        "arnr-maxframes": arnr_maxframes,
+        "quant-b-adapt": 1,
+        "enable-global-motion": 0,
+        "max-reference-frames": max_reference_frames,
+    }
 
-# Define presets as dictionaries of encoder parameters
-presets = {
-    "720p": {
-        "color-primaries": "bt709",
-        "transfer-characteristics": "bt709",
-        "matrix-coefficients": "bt709",
-        "tile-columns": 0,
-        "tile-rows": 0,
-        "max-partition-size": 32,
-        "max-reference-frames": 5,
-        # Add more parameters as needed
-    },
-    "720p-lavish": {
-        "color-primaries": "bt709",
-        "transfer-characteristics": "bt709",
-        "matrix-coefficients": "bt709",
-        "deltaq-mode": 6,
-        "tile-columns": 0,
-        "tile-rows": 0,
-        "max-partition-size": 32,
-        "ssim-rd-mult": 125,
-        "luma-bias": 24,
-        "luma-bias-midpoint": 25,
-        "luma-bias-strength": 10,
-        "max-reference-frames": 5,
-        "arnr-strength": 0,
-        "arnr-maxframes": 0,
-        "tpl-strength": 0,
-        "chroma-q-offset-u": -q + 2,
-        "chroma-q-offset-v": -q + 2,
-        "enable-experimental-psy": 1,
-        # Add more parameters as needed
-    },
-    "1080p": {
-        "color-primaries": "bt709",
-        "transfer-characteristics": "bt709",
-        "matrix-coefficients": "bt709",
-        "tile-columns": 1,
-        "tile-rows": 0,
-        "max-partition-size": 32,
-        "max-reference-frames": 4,
-        # Add more parameters as needed
-    },
-    "1080p-lavish": {
-        "color-primaries": "bt709",
-        "transfer-characteristics": "bt709",
-        "matrix-coefficients": "bt709",
-        "deltaq-mode": 6,
-        "tile-columns": 1,
-        "tile-rows": 0,
-        "max-partition-size": 32,
-        "ssim-rd-mult": 125,
-        "luma-bias": 24,
-        "luma-bias-midpoint": 25,
-        "luma-bias-strength": 10,
-        "max-reference-frames": 4,
-        "arnr-strength": 0,
-        "arnr-maxframes": 0,
-        "tpl-strength": 0,
-        "chroma-q-offset-u": -q + 2,
-        "chroma-q-offset-v": -q + 2,
-        "enable-experimental-psy": 1,
-        # Add more parameters as needed
-    },
-    "1080p-hdr": {
-        "color-primaries": "bt2020",
-        "transfer-characteristics": "smpte2084",
-        "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 5,
-        "tile-columns": 1,
-        "tile-rows": 0,
-        "max-partition-size": 32,
-        "max-reference-frames": 4,
-        # Add more parameters as needed
-    },
-    "1080p-hdr-lavish": {
-        "color-primaries": "bt2020",
-        "transfer-characteristics": "smpte2084",
-        "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 6,
-        "tile-columns": 1,
-        "tile-rows": 0,
-        "max-partition-size": 32,
-        "ssim-rd-mult": 125,
-        "luma-bias": 24,
-        "luma-bias-midpoint": 25,
-        "luma-bias-strength": 10,
-        "max-reference-frames": 4,
-        "arnr-strength": 0,
-        "arnr-maxframes": 0,
-        "tpl-strength": 0,
-        "chroma-q-offset-u": -q + 2,
-        "chroma-q-offset-v": -q + 2,
-        "enable-experimental-psy": 1,
-        # Add more parameters as needed
-    },
-    "1440p-hdr": {
-        "color-primaries": "bt2020",
-        "transfer-characteristics": "smpte2084",
-        "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 5,
-        "tile-columns": 1,
-        "tile-rows": 1,
-        "max-partition-size": 32,
-        "max-reference-frames": 4,
-        # Add more parameters as needed
-    },
-    "1440p-hdr-lavish": {
-        "color-primaries": "bt2020",
-        "transfer-characteristics": "smpte2084",
-        "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 6,
-        "tile-columns": 1,
-        "tile-rows": 1,
-        "max-partition-size": 32,
-        "ssim-rd-mult": 125,
-        "luma-bias": 24,
-        "luma-bias-midpoint": 25,
-        "luma-bias-strength": 10,
-        "max-reference-frames": 4,
-        "arnr-strength": 0,
-        "arnr-maxframes": 0,
-        "tpl-strength": 0,
-        "chroma-q-offset-u": -q + 2,
-        "chroma-q-offset-v": -q + 2,
-        "enable-experimental-psy": 1,
-        # Add more parameters as needed
-    },
-    "2160p-hdr": {
-        "color-primaries": "bt2020",
-        "transfer-characteristics": "smpte2084",
-        "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 5,
-        "tile-columns": 1,
-        "tile-rows": 1,
-        "max-partition-size": 32,
-        "max-reference-frames": 4,
-        # Add more parameters as needed
-    },
-    "2160p-hdr-lavish": {
-        "color-primaries": "bt2020",
-        "transfer-characteristics": "smpte2084",
-        "matrix-coefficients": "bt2020ncl",
-        "deltaq-mode": 6,
-        "tile-columns": 1,
-        "tile-rows": 1,
-        "max-partition-size": 32,
-        "ssim-rd-mult": 125,
-        "luma-bias": 24,
-        "luma-bias-midpoint": 25,
-        "luma-bias-strength": 10,
-        "max-reference-frames": 4,
-        "arnr-strength": 0,
-        "arnr-maxframes": 0,
-        "tpl-strength": 0,
-        "chroma-q-offset-u": -q + 2,
-        "chroma-q-offset-v": -q + 2,
-        "enable-experimental-psy": 1,
-        # Add more parameters as needed
-    },
-    # Add more presets as needed
-}.get(preset, {})
+    # Define presets as dictionaries of encoder parameters
+    presets = {
+        "720p": {
+            "color-primaries": "bt709",
+            "transfer-characteristics": "bt709",
+            "matrix-coefficients": "bt709",
+            "tile-columns": 0,
+            "tile-rows": 0,
+            "max-partition-size": 32,
+            "max-reference-frames": 5,
+            # Add more parameters as needed
+        },
+        "720p-lavish": {
+            "color-primaries": "bt709",
+            "transfer-characteristics": "bt709",
+            "matrix-coefficients": "bt709",
+            "deltaq-mode": 6,
+            "tile-columns": 0,
+            "tile-rows": 0,
+            "max-partition-size": 32,
+            "ssim-rd-mult": 125,
+            "luma-bias": 24,
+            "luma-bias-midpoint": 25,
+            "luma-bias-strength": 10,
+            "max-reference-frames": 5,
+            "arnr-strength": 0,
+            "arnr-maxframes": 0,
+            "tpl-strength": 0,
+            "chroma-q-offset-u": -q + 2,
+            "chroma-q-offset-v": -q + 2,
+            "enable-experimental-psy": 1,
+            # Add more parameters as needed
+        },
+        "1080p": {
+            "color-primaries": "bt709",
+            "transfer-characteristics": "bt709",
+            "matrix-coefficients": "bt709",
+            "tile-columns": 1,
+            "tile-rows": 0,
+            "max-partition-size": 32,
+            "max-reference-frames": 4,
+            # Add more parameters as needed
+        },
+        "1080p-lavish": {
+            "color-primaries": "bt709",
+            "transfer-characteristics": "bt709",
+            "matrix-coefficients": "bt709",
+            "deltaq-mode": 6,
+            "tile-columns": 1,
+            "tile-rows": 0,
+            "max-partition-size": 32,
+            "ssim-rd-mult": 125,
+            "luma-bias": 24,
+            "luma-bias-midpoint": 25,
+            "luma-bias-strength": 10,
+            "max-reference-frames": 4,
+            "arnr-strength": 0,
+            "arnr-maxframes": 0,
+            "tpl-strength": 0,
+            "chroma-q-offset-u": -q + 2,
+            "chroma-q-offset-v": -q + 2,
+            "enable-experimental-psy": 1,
+            # Add more parameters as needed
+        },
+        "1080p-hdr": {
+            "color-primaries": "bt2020",
+            "transfer-characteristics": "smpte2084",
+            "matrix-coefficients": "bt2020ncl",
+            "deltaq-mode": 5,
+            "tile-columns": 1,
+            "tile-rows": 0,
+            "max-partition-size": 32,
+            "max-reference-frames": 4,
+            # Add more parameters as needed
+        },
+        "1080p-hdr-lavish": {
+            "color-primaries": "bt2020",
+            "transfer-characteristics": "smpte2084",
+            "matrix-coefficients": "bt2020ncl",
+            "deltaq-mode": 6,
+            "tile-columns": 1,
+            "tile-rows": 0,
+            "max-partition-size": 32,
+            "ssim-rd-mult": 125,
+            "luma-bias": 24,
+            "luma-bias-midpoint": 25,
+            "luma-bias-strength": 10,
+            "max-reference-frames": 4,
+            "arnr-strength": 0,
+            "arnr-maxframes": 0,
+            "tpl-strength": 0,
+            "chroma-q-offset-u": -q + 2,
+            "chroma-q-offset-v": -q + 2,
+            "enable-experimental-psy": 1,
+            # Add more parameters as needed
+        },
+        "1440p-hdr": {
+            "color-primaries": "bt2020",
+            "transfer-characteristics": "smpte2084",
+            "matrix-coefficients": "bt2020ncl",
+            "deltaq-mode": 5,
+            "tile-columns": 1,
+            "tile-rows": 1,
+            "max-partition-size": 32,
+            "max-reference-frames": 4,
+            # Add more parameters as needed
+        },
+        "1440p-hdr-lavish": {
+            "color-primaries": "bt2020",
+            "transfer-characteristics": "smpte2084",
+            "matrix-coefficients": "bt2020ncl",
+            "deltaq-mode": 6,
+            "tile-columns": 1,
+            "tile-rows": 1,
+            "max-partition-size": 32,
+            "ssim-rd-mult": 125,
+            "luma-bias": 24,
+            "luma-bias-midpoint": 25,
+            "luma-bias-strength": 10,
+            "max-reference-frames": 4,
+            "arnr-strength": 0,
+            "arnr-maxframes": 0,
+            "tpl-strength": 0,
+            "chroma-q-offset-u": -q + 2,
+            "chroma-q-offset-v": -q + 2,
+            "enable-experimental-psy": 1,
+            # Add more parameters as needed
+        },
+        "2160p-hdr": {
+            "color-primaries": "bt2020",
+            "transfer-characteristics": "smpte2084",
+            "matrix-coefficients": "bt2020ncl",
+            "deltaq-mode": 5,
+            "tile-columns": 1,
+            "tile-rows": 1,
+            "max-partition-size": 32,
+            "max-reference-frames": 4,
+            # Add more parameters as needed
+        },
+        "2160p-hdr-lavish": {
+            "color-primaries": "bt2020",
+            "transfer-characteristics": "smpte2084",
+            "matrix-coefficients": "bt2020ncl",
+            "deltaq-mode": 6,
+            "tile-columns": 1,
+            "tile-rows": 1,
+            "max-partition-size": 32,
+            "ssim-rd-mult": 125,
+            "luma-bias": 24,
+            "luma-bias-midpoint": 25,
+            "luma-bias-strength": 10,
+            "max-reference-frames": 4,
+            "arnr-strength": 0,
+            "arnr-maxframes": 0,
+            "tpl-strength": 0,
+            "chroma-q-offset-u": -q + 2,
+            "chroma-q-offset-v": -q + 2,
+            "enable-experimental-psy": 1,
+            # Add more parameters as needed
+        },
+        # Add more presets as needed
+    }.get(preset, {})
 
 # Update or add parameters from the preset if they are not specified in valid_params
 for key, value in presets.items():
@@ -993,8 +1112,13 @@ for key, value in vars(args).items():
     if param_key in encode_params and value is not None:
         encode_params[param_key] = value
 
-# Create a list of non-empty parameters in the format "--key=value"
-encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
+# Create a list of non-empty parameters in the encoder supported format
+if encoder == 'svt':
+    encode_params = [f"--{key} {value}" for key, value in encode_params.items() if value is not None]
+else:
+    encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
+
+# print (encode_params)
 
 # Determine the output folder name based on the encode_script
 output_folder_name = os.path.splitext(os.path.basename(encode_script))[0]
@@ -1021,17 +1145,24 @@ output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
 
 # Generate the FGS analysis file names
 output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
-output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.webm")
+output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.ivf")
 output_grain_table = os.path.split(encode_script)[0]
 output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
 output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
 
 # Create the reference files for FGS
-if graintable_method > 0:
-    create_fgs_table()
-    encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
+if encoder == 'svt':
+    if graintable_method > 0:
+        create_fgs_table(encode_params)
+        encode_params.append(f"--fgs-table \"{output_grain_table}\"")
+    elif graintable:
+        encode_params.append(f"--fgs-table \"{graintable}\"")
 else:
-    encode_params.append(f"--film-grain-table=\"{graintable}\"")
+    if graintable_method > 0:
+        create_fgs_table(encode_params)
+        encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
+    elif graintable:
+        encode_params.append(f"--film-grain-table=\"{graintable}\"")
 
 # Detect scene changes
 scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
