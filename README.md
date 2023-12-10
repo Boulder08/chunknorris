@@ -239,7 +239,9 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Example: --credits-cpu 6
 - Default: cpu + 1
 
-**--mastering** and **--cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md
+**--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
+**NOTE:** If you use DGIndexNV to index the source file, you can copy-paste the data from the end of the .dgi file for these parameters and the script will automatically adjust the values according to what svt-av1 expects.
+For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing.
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 

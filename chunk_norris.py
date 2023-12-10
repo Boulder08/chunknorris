@@ -1,8 +1,8 @@
 # Chunk Norris
 #
-# A very simple Python script to do chunked encoding using the aomenc CLI encoder.
+# A very simple Python script to do chunked encoding using an AV1 CLI encoder.
 #
-# Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended)
+# Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended) or svt-av1
 # Make sure you have ffmpeg and the encoder in PATH or where you run the script.
 #
 # Set common parameters in default_params and add/edit the presets as needed.
@@ -302,14 +302,14 @@ def create_fgs_table(encode_params):
             avs2yuv_command_grain = [
                 "avs2yuv64.exe",
                 "-no-mt",
-                grain_script,
+                '"' + grain_script + '"',
                 "-"
             ]
         else:
             avs2yuv_command_grain = [
                 "ffmpeg.exe",
                 "-loglevel", "fatal",
-                "-i", grain_script,
+                "-i", '"' + grain_script + '"',
                 "-f", "yuv4mpegpipe",
                 "-strict", "-1",
                 "-"
@@ -322,7 +322,7 @@ def create_fgs_table(encode_params):
                 *encode_params_grain,
                 f"--preset {cpu}",
                 f"--crf {q}",
-                "-b", output_grain_file_encoded,
+                "-b", '"' + output_grain_file_encoded + '"',
                 "-i -"
             ]
         else:
@@ -333,10 +333,9 @@ def create_fgs_table(encode_params):
                 "--passes=1",
                 f"--cpu-used={cpu}",
                 f"--cq-level={q}",
-                "-o", output_grain_file_encoded,
+                "-o", '"' + output_grain_file_encoded + '"',
                 "-"
             ]
-
         ffmpeg_command_grain = [
             "ffmpeg.exe",
             "-i", grain_script,
@@ -696,6 +695,50 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
     return encode_commands, input_files, chunklist, chunklist_dict
 
 
+def parse_master_display(master_display, max_cll):
+    # Define conversion factors
+    conversion_factors = {'G': 0.00002, 'B': 0.00002, 'R': 0.00002, 'WP': 0.00002, 'L': 0.0001}
+
+    # Regular expression to extract values from the input string
+    pattern = re.compile(r'([A-Z]+)\((\d+),(\d+)\)')
+
+    # Function to apply the conversion factor to the extracted values
+    def convert(match):
+        group, value1, value2 = match.groups()
+        factor = conversion_factors.get(group, 1.0)
+        new_value1 = int(value1) * factor
+        new_value2 = int(value2) * factor
+
+        # Round the values to three decimals
+        new_value1 = round(new_value1, 3)
+        new_value2 = round(new_value2, 3)
+
+        # If the result is greater than 1, convert to int
+        if new_value1 > 1:
+            new_value1 = int(new_value1)
+        if new_value2 > 1:
+            new_value2 = int(new_value2)
+
+        return f'{group}({new_value1},{new_value2})'
+
+    # Extract all values from the input string
+    matches = pattern.findall(master_display)
+
+    # Check if any of the original values is greater than 1
+    if any(int(value1) > 1 or int(value2) > 1 for group, value1, value2 in matches):
+        # Apply the conversion function to the input string
+        processed_string = pattern.sub(convert, master_display)
+    else:
+        processed_string = master_display
+
+    # Remove quotes from the result
+    processed_string = processed_string.replace('"', '')
+    max_cll = max_cll.replace('"', '')
+    print(processed_string, max_cll)
+
+    return processed_string, max_cll
+
+
 # Function to execute encoding commands and print them for debugging
 def run_encode_command(command):
     avs2yuv_command, aomenc_command, output_chunk = command
@@ -709,11 +752,11 @@ def run_encode_command(command):
     avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
     aomenc_process = subprocess.Popen(aomenc_command, stdin=avs2yuv_process.stdout, shell=True)
 
-    # Wait for aomenc to finish
+    # Wait for the encoder to finish
     aomenc_process.communicate()
 
     if aomenc_process.returncode != 0:
-        print("Error in aomenc processing, chunk", output_chunk)
+        print("Error in encoder processing, chunk", output_chunk)
         print("Return code:", aomenc_process.returncode)
 
     return output_chunk
@@ -723,38 +766,39 @@ parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
 parser.add_argument('--encoder', nargs='?', default='svt', type=str)
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
-parser.add_argument('--cpu', nargs='?', default=3, type=int)
-parser.add_argument('--threads', nargs='?', type=int)
-parser.add_argument('--q', nargs='?', default=14, type=int)
-parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
-parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
+parser.add_argument('--cpu', nargs='?', choices=range(-1, 11), default=3, type=int)
+parser.add_argument('--threads', nargs='?', choices=range(1, 64), type=int)
+parser.add_argument('--q', nargs='?', default=14, choices=range(2, 64), type=int)
+parser.add_argument('--min-chunk-length', nargs='?', default=64, choices=range(5, 999999), type=int)
+parser.add_argument('--max-parallel-encodes', nargs='?', default=4, choices=range(1, 64), type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
-parser.add_argument('--sharpness', nargs='?', default=2, type=int)
-parser.add_argument('--tile-columns', nargs='?', type=int)
-parser.add_argument('--tile-rows', nargs='?', type=int)
-parser.add_argument('--arnr-strength', default=2, nargs='?', type=int)
-parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
-parser.add_argument('--tpl-strength', nargs='?', type=int)
-parser.add_argument('--max-reference-frames', default=4, nargs='?', type=int)
+parser.add_argument('--sharpness', nargs='?', default=2, choices=range(0, 7), type=int)
+parser.add_argument('--tile-columns', nargs='?', choices=range(0, 4), type=int)
+parser.add_argument('--tile-rows', nargs='?', choices=range(0, 4), type=int)
+parser.add_argument('--arnr-strength', default=2, nargs='?', choices=range(0, 6), type=int)
+parser.add_argument('--arnr-maxframes', default=7, nargs='?', choices=range(0, 15), type=int)
+parser.add_argument('--tpl-strength', nargs='?', choices=range(0, 100), type=int)
+parser.add_argument('--max-reference-frames', default=4, nargs='?', choices=range(3, 7), type=int)
 parser.add_argument('--tune', nargs='?', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
-parser.add_argument('--luma-bias', nargs='?', type=int)
-parser.add_argument('--luma-bias-strength', nargs='?', type=int)
-parser.add_argument('--luma-bias-midpoint', nargs='?', type=int)
-parser.add_argument('--deltaq-mode', nargs='?', type=int)
-parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
-parser.add_argument('--graintable-sat', nargs='?', type=float)
+parser.add_argument('--luma-bias', nargs='?', choices=range(0, 100), type=int)
+parser.add_argument('--luma-bias-strength', nargs='?', choices=range(0, 100), type=int)
+parser.add_argument('--luma-bias-midpoint', nargs='?', choices=range(0, 255), type=int)
+parser.add_argument('--deltaq-mode', nargs='?', choices=range(0, 6), type=int)
+parser.add_argument('--tf', nargs='?', default=1, choices=[0, 1], type=int)
+parser.add_argument('--graintable-method', nargs='?', default=1, choices=[0, 1], type=int)
+parser.add_argument('--graintable-sat', nargs='?', choices=range(0, 1), type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--scd-method', nargs='?', default=3, type=int)
-parser.add_argument('--scd-tonemap', nargs='?', type=int)
-parser.add_argument('--scdthresh', nargs='?', type=float)
-parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
-parser.add_argument('--decode-method', nargs='?', default=1, type=int)
+parser.add_argument('--scd-method', nargs='?', default=3, choices=range(0, 6), type=int)
+parser.add_argument('--scd-tonemap', nargs='?', choices=[0, 1], type=int)
+parser.add_argument('--scdthresh', nargs='?', choices=range(0, 10), type=float)
+parser.add_argument('--downscale-scd', nargs='?', default=4, choices=range(0, 8), type=int)
+parser.add_argument('--decode-method', nargs='?', default=1, choices=[0, 1], type=int)
 parser.add_argument('--credits-start-frame', nargs='?', type=int)
-parser.add_argument('--credits-q', nargs='?', default=32, type=int)
-parser.add_argument('--credits-cpu', nargs='?', type=int)
-parser.add_argument('--mastering', nargs='?', type=str)
-parser.add_argument('--cll', nargs='?', type=str)
+parser.add_argument('--credits-q', nargs='?', default=32, choices=range(2, 64), type=int)
+parser.add_argument('--credits-cpu', nargs='?', choices=range(-1, 11), type=int)
+parser.add_argument('--master-display', nargs='?', type=str)
+parser.add_argument('--max-cll', nargs='?', type=str)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -790,12 +834,13 @@ luma_bias = args.luma_bias
 luma_bias_strength = args.luma_bias_strength
 luma_bias_midpoint = args.luma_bias_midpoint
 deltaq_mode = args.deltaq_mode
+tf = args.tf
 tplstrength = args.tpl_strength
 credits_start_frame = args.credits_start_frame
 credits_q = args.credits_q
 credits_cpu = args.credits_cpu
-mastering = args.mastering
-cll = args.cll
+master_display = args.master_display
+max_cll = args.max_cll
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
@@ -829,7 +874,7 @@ if credits_cpu is None:
     credits_cpu = cpu + 1
 if threads is None:
     if encoder == 'svt':
-        threads = 2
+        threads = 4
     else:
         threads = 6
 if graintable_sat is None:
@@ -837,6 +882,12 @@ if graintable_sat is None:
         graintable_sat = 1.0
     else:
         graintable_sat = 0
+
+# Change the master-display and max-cll parameters to svt-av1 format if needed
+if master_display:
+    if max_cll is None:
+        max_cll = "0,0"
+    master_display, max_cll = parse_master_display(master_display, max_cll)
 
 if encoder == 'svt':
     default_values = {
@@ -846,7 +897,7 @@ if encoder == 'svt':
         "qm-max": 9,
         "keyint": "10s",
         "enable-cdef": 0,
-        "enable-tf": 0,
+        "enable-tf": tf,
         "film-grain": noiselevel,
         "film-grain-denoise": 0,
         "lp": threads,
@@ -874,8 +925,8 @@ if encoder == 'svt':
             "transfer-characteristics": 16,
             "matrix-coefficients": 9,
             "chroma-sample-position": 2,
-            "mastering-display": mastering,
-            "content-light": cll,
+            "mastering-display": master_display,
+            "content-light": max_cll,
             "enable-hdr": 1,
             # Add more parameters as needed
         },
@@ -884,8 +935,8 @@ if encoder == 'svt':
             "transfer-characteristics": 16,
             "matrix-coefficients": 9,
             "chroma-sample-position": 2,
-            "mastering-display": mastering,
-            "content-light": cll,
+            "mastering-display": master_display,
+            "content-light": max_cll,
             "enable-hdr": 1,
             # Add more parameters as needed
         },
@@ -894,8 +945,8 @@ if encoder == 'svt':
             "transfer-characteristics": 16,
             "matrix-coefficients": 9,
             "chroma-sample-position": 2,
-            "mastering-display": mastering,
-            "content-light": cll,
+            "mastering-display": master_display,
+            "content-light": max_cll,
             "enable-hdr": 1,
             # Add more parameters as needed
         },
@@ -1094,6 +1145,10 @@ else:
         },
         # Add more presets as needed
     }.get(preset, {})
+
+if not presets:
+    print("No matching preset found.\n")
+    sys.exit(1)
 
 # Update or add parameters from the preset if they are not specified in valid_params
 for key, value in presets.items():
