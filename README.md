@@ -26,7 +26,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - ffmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
-- aomenc (the lavish mod is recommended) / svt-av1 (see below for compatible binaries)
+- aomenc (the lavish mod is recommended) / svt-av1 (see below for compatible binaries) / rav1e
 - grav1synth (in case of --graintable-method 1)
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
@@ -41,6 +41,7 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
 **SVT-AV1 binaries to use with this script**: https://drive.google.com/file/d/1HheHLCXxc91T_K6gcTNtcN1JNRn-xN7i/view?usp=drive_link
 - includes the var-deltaq optimizations (https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2105#note_1666136918), choose one you wish to apply and rename the binary to svtav1encapp.exe
+
 The source: https://github.com/BlueSwordM/SVT-AV1 (thanks!)
 
 
@@ -111,7 +112,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 ## Options
 
-**--encoder**: Chooses the encoder to use. Currently available: aomenc, svt
+**--encoder**: Chooses the encoder to use. Currently available: aomenc, svt, rav1e
 - Example: --encoder aom
 - Default: svt
 
@@ -119,23 +120,23 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --preset 720p
 - Default: 1080p
 
-**--cpu**: Defines the '--cpu-used' parameter in aomenc, or '--preset' in svt-av1. Lower is better, but also slower.
+**--cpu**: Defines the '--cpu-used' parameter in aomenc, '--preset' in svt-av1 or '-s' in rav1e. Lower is better, but also slower.
 - Example: --cpu 6
 - Default: 3
 
 **--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead in aomenc and much better performance in svt-av1.
 - Example: --threads 4
-- Default: 6 for aomenc, 2 for svt-av1
+- Default: 6 for aomenc and rav1e, 4 for svt-av1
 
 **--q**: Defines a Q value the encoder will use. In aomenc, the script does a one-pass encode in Q mode, which is the closest to constant quality with a single pass. In svt-av1, CRF mode is used.
 - Example: --q 16
-- Default: 14
+- Default: 14 for aomenc and svt-av1, 60 for rav1e
 
 **--min-chunk-length**: Defines the minimum encoded chunk length in frames. If there are detected scenes shorter than this amount, the script combines adjacent scenes until the condition is satisfied.
 - Example: --min-chunk-length 100
-- Default: 64 (the same as --lag-in-frames in the default parameters)
+- Default: 64 (the same as --lag-in-frames in the default aomenc parameters)
 
-**--max-parallel-encodes**: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory.
+**--max-parallel-encodes**: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory. Rav1e most likely threads worse so a higher amount is recommended.
 - Example: --max-parallel-encodes 8
 - Default: 4
 
@@ -147,7 +148,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --sharpness 3
 - Default: 2
 
-**--tile-columns** and **--tile-rows**: Define the corresponding parameters for splitting the encoding (and decoding) into multiple tiles in aomenc. Svt-av1 optimizes tiles automatically based on the resolution.
+**--tile-columns** and **--tile-rows**: Define the corresponding parameters for splitting the encoding (and decoding) into multiple tiles in aomenc. Svt-av1 and rav1e optimize tiles automatically based on the resolution.
 - Example: --tile-columns 1 --tile-rows 1
 - Default: None for both
 
@@ -176,6 +177,8 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Default: None
 
 **--deltaq-mode**: Defines the deltaq-mode parameter in aomenc. In aomenc-lavish, mode 6 is highly recommended for both SDR and HDR encodes (the effect is close to modes 1+5 with dark bias for SDR and bright bias for HDR). With vanilla aomenc, use 1 for SDR and 5 for HDR.
+
+
 **If you use deltaq-mode 6, make sure you feed 10-bit data into the encoder as the bias table is not yet normalized depending on the source bitdepth.**
 - Example: --deltaq-mode 1
 - Default: None
@@ -240,7 +243,10 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Default: cpu + 1
 
 **--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
+
+
 **NOTE:** If you use DGIndexNV to index the source file, you can copy-paste the data from the end of the .dgi file for these parameters and the script will automatically adjust the values according to what svt-av1 expects.
+
 For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing.
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.

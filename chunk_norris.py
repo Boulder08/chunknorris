@@ -315,7 +315,18 @@ def create_fgs_table(encode_params):
                 "-"
             ]
 
-        if encoder == 'svt':
+        if encoder == 'rav1e':
+            encode_params_grain = [x.replace(f'--threads {threads}', '--threads 0') for x in encode_params]
+            aomenc_command_grain = [
+                "rav1e.exe",
+                *encode_params_grain,
+                f"--speed {cpu}",
+                f"--quantizer {q}",
+                "--no-scene-detection",
+                "-o", '"' + output_grain_file_encoded + '"',
+                "-"
+            ]
+        elif encoder == 'svt':
             encode_params_grain = [x.replace(f'--lp {threads}', '--lp 0') for x in encode_params]
             aomenc_command_grain = [
                 "svtav1encapp.exe",
@@ -644,7 +655,30 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 "-"
             ]
 
-        if encoder == 'svt':
+        if encoder == 'rav1e':
+            if i['credits'] == 0:
+                aomenc_command = [
+                    "rav1e.exe",
+                    *encode_params,
+                    "-q",
+                    f"--speed {cpu}",
+                    f"--quantizer {q}",
+                    "--no-scene-detection",
+                    "-o", '"' + output_chunk + '"',
+                    "-",
+                    "2> nul"
+            ]
+            else:
+                aomenc_command = [
+                    "rav1e.exe",
+                    *encode_params,
+                    "-q",
+                    f"--speed {credits_cpu}",
+                    f"--quantizer {credits_q}",
+                    "-o", '"' + output_chunk + '"',
+                    "-"
+                ]
+        elif encoder == 'svt':
             if i['credits'] == 0:
                 aomenc_command = [
                     "svtav1encapp.exe",
@@ -766,39 +800,40 @@ parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
 parser.add_argument('--encoder', nargs='?', default='svt', type=str)
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
-parser.add_argument('--cpu', nargs='?', choices=range(-1, 11), default=3, type=int)
-parser.add_argument('--threads', nargs='?', choices=range(1, 64), type=int)
-parser.add_argument('--q', nargs='?', default=14, choices=range(2, 64), type=int)
-parser.add_argument('--min-chunk-length', nargs='?', default=64, choices=range(5, 999999), type=int)
-parser.add_argument('--max-parallel-encodes', nargs='?', default=4, choices=range(1, 64), type=int)
+parser.add_argument('--cpu', nargs='?', default=3, type=int)
+parser.add_argument('--threads', nargs='?', type=int)
+parser.add_argument('--q', nargs='?', type=int)
+parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
+parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
-parser.add_argument('--sharpness', nargs='?', default=2, choices=range(0, 7), type=int)
-parser.add_argument('--tile-columns', nargs='?', choices=range(0, 4), type=int)
-parser.add_argument('--tile-rows', nargs='?', choices=range(0, 4), type=int)
-parser.add_argument('--arnr-strength', default=2, nargs='?', choices=range(0, 6), type=int)
-parser.add_argument('--arnr-maxframes', default=7, nargs='?', choices=range(0, 15), type=int)
-parser.add_argument('--tpl-strength', nargs='?', choices=range(0, 100), type=int)
-parser.add_argument('--max-reference-frames', default=4, nargs='?', choices=range(3, 7), type=int)
+parser.add_argument('--sharpness', nargs='?', default=2, type=int)
+parser.add_argument('--tile-columns', nargs='?', type=int)
+parser.add_argument('--tile-rows', nargs='?', type=int)
+parser.add_argument('--arnr-strength', default=2, nargs='?', type=int)
+parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
+parser.add_argument('--tpl-strength', nargs='?', type=int)
+parser.add_argument('--max-reference-frames', default=4, nargs='?', type=int)
 parser.add_argument('--tune', nargs='?', type=str)
 parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
-parser.add_argument('--luma-bias', nargs='?', choices=range(0, 100), type=int)
-parser.add_argument('--luma-bias-strength', nargs='?', choices=range(0, 100), type=int)
-parser.add_argument('--luma-bias-midpoint', nargs='?', choices=range(0, 255), type=int)
-parser.add_argument('--deltaq-mode', nargs='?', choices=range(0, 6), type=int)
-parser.add_argument('--tf', nargs='?', default=1, choices=[0, 1], type=int)
-parser.add_argument('--graintable-method', nargs='?', default=1, choices=[0, 1], type=int)
-parser.add_argument('--graintable-sat', nargs='?', choices=range(0, 1), type=float)
+parser.add_argument('--luma-bias', nargs='?', type=int)
+parser.add_argument('--luma-bias-strength', nargs='?', type=int)
+parser.add_argument('--luma-bias-midpoint', nargs='?', type=int)
+parser.add_argument('--deltaq-mode', nargs='?', type=int)
+parser.add_argument('--tf', nargs='?', default=1, type=int)
+parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
+parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--scd-method', nargs='?', default=3, choices=range(0, 6), type=int)
-parser.add_argument('--scd-tonemap', nargs='?', choices=[0, 1], type=int)
-parser.add_argument('--scdthresh', nargs='?', choices=range(0, 10), type=float)
-parser.add_argument('--downscale-scd', nargs='?', default=4, choices=range(0, 8), type=int)
-parser.add_argument('--decode-method', nargs='?', default=1, choices=[0, 1], type=int)
+parser.add_argument('--scd-method', nargs='?', default=3, type=int)
+parser.add_argument('--scd-tonemap', nargs='?', type=int)
+parser.add_argument('--scdthresh', nargs='?', type=float)
+parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
+parser.add_argument('--decode-method', nargs='?', default=1, type=int)
 parser.add_argument('--credits-start-frame', nargs='?', type=int)
-parser.add_argument('--credits-q', nargs='?', default=32, choices=range(2, 64), type=int)
-parser.add_argument('--credits-cpu', nargs='?', choices=range(-1, 11), type=int)
+parser.add_argument('--credits-q', nargs='?', type=int)
+parser.add_argument('--credits-cpu', nargs='?', type=int)
 parser.add_argument('--master-display', nargs='?', type=str)
 parser.add_argument('--max-cll', nargs='?', type=str)
+parser.add_argument('--lookahead', nargs='?', type=int)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -841,6 +876,102 @@ credits_q = args.credits_q
 credits_cpu = args.credits_cpu
 master_display = args.master_display
 max_cll = args.max_cll
+lookahead = args.lookahead
+
+# Sanity checks of parameters, no thanks to Python argparse being stupid if the allowed range is big
+if encode_script is None:
+    print("You need to supply a script to encode.\n")
+    sys.exit(1)
+elif encoder not in ('rav1e', 'svt', 'aom'):
+    print("Valid encoder choices are rav1e, svt or aom.\n")
+    sys.exit(1)
+elif encoder in ('svt', 'aom') and 2 > q > 64:
+    print("Q must be 2-64.\n")
+    sys.exit(1)
+elif encoder == 'rav1e' and 0 > q > 255:
+    print("Q must be 0-255.\n")
+    sys.exit(1)
+elif -1 > cpu > 11:
+    print("CPU must be -1..11.\n")
+    sys.exit(1)
+elif 1 > threads > 64:
+    print("Threads must be 1-64.\n")
+    sys.exit(1)
+elif 5 > min_chunk_length > 999999:
+    print("Minimum chunk length must be 5-999999.\n")
+    sys.exit(1)
+elif 1 > max_parallel_encodes > 64:
+    print("Maximum parallel encodes is 1-64.\n")
+    sys.exit(1)
+elif 0 > sharpness > 7:
+    print("Sharpness must be 0-7.\n")
+    sys.exit(1)
+elif tile_columns and 0 > tile_columns > 4:
+    print("Number of column or row tiles must be 0-4.\n")
+    sys.exit(1)
+elif tile_rows and 0 > tile_rows > 4:
+    print("Number of column or row tiles must be 0-4.\n")
+    sys.exit(1)
+elif 0 > arnr_strength > 6:
+    print("Arnr-strength must be 0-6.\n")
+    sys.exit(1)
+elif 0 > arnr_maxframes > 15:
+    print("Arnr-maxframes must be 0-15.\n")
+    sys.exit(1)
+elif tplstrength and 0 > tplstrength > 100:
+    print("Tpl-strength must be 0-100.\n")
+    sys.exit(1)
+elif 3 > max_reference_frames > 7:
+    print("Maximum reference frames must be 3-7.\n")
+    sys.exit(1)
+elif luma_bias and 0 > luma_bias > 100:
+    print("Valid ranges for luma bias, luma bias strength and luma bias midpoint is 0-100, 0-100 and 0-255 respectively.\n")
+    sys.exit(1)
+elif luma_bias_strength and 0 > luma_bias_strength > 100:
+    print("Valid ranges for luma bias, luma bias strength and luma bias midpoint is 0-100, 0-100 and 0-255 respectively.\n")
+    sys.exit(1)
+elif luma_bias_midpoint and 0 > luma_bias_midpoint > 255:
+    print("Valid ranges for luma bias, luma bias strength and luma bias midpoint is 0-100, 0-100 and 0-255 respectively.\n")
+    sys.exit(1)
+elif deltaq_mode and 0 > deltaq_mode > 6:
+    print("Deltaq-mode must be 0-6.\n")
+    sys.exit(1)
+elif 0 > tf > 1:
+    print("Tf must be 0 or 1.\n")
+    sys.exit(1)
+elif 0 > graintable_method > 1:
+    print("Graintable method must be 0 or 1.\n")
+    sys.exit(1)
+elif graintable_sat and 0 > graintable_sat > 1:
+    print("Graintable saturation must be 0-1.0.\n")
+    sys.exit(1)
+elif 0 > scd_method > 6:
+    print("Scene change detection method must be 0-6.\n")
+    sys.exit(1)
+elif scd_tonemap and 0 > scd_tonemap > 1:
+    print("Scene change detection tonemap must be 0 or 1.\n")
+    sys.exit(1)
+elif scdthresh and 1 > scdthresh > 10:
+    print("Scene change detection threshold must be 1-10.0.\n")
+    sys.exit(1)
+elif 0 > downscale_scd > 8:
+    print("Scene change detection downscale factor must be 0-8.\n")
+    sys.exit(1)
+elif 0 > decode_method > 1:
+    print("Decoding method must be 0 or 1.\n")
+    sys.exit(1)
+elif credits_q and encoder in ('svt', 'aom') and 2 > credits_q > 64:
+    print("Q for credits must be 2-64.\n")
+    sys.exit(1)
+elif credits_q and encoder == 'rav1e' and 0 > credits_q > 255:
+    print("Q for credits must be 0-255.\n")
+    sys.exit(1)
+elif credits_cpu and -1 > credits_cpu > 11:
+    print("CPU for credits must be -1..11.\n")
+    sys.exit(1)
+elif lookahead and 0 > lookahead > 120:
+    print("Lookahead must be 0-120.\n")
+    sys.exit(1)
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
@@ -857,7 +988,10 @@ scene_change_file_path = os.path.dirname(encode_script)
 
 # Set some more case dependent default values
 if noiselevel is None or graintable or graintable_method > 0:
-    noiselevel = 0
+    if encoder in ('svt', 'aom'):
+        noiselevel = 0
+    else:
+        noiselevel is None
 if graintable:
     graintable_method = 0
 if scdthresh is None:
@@ -872,6 +1006,15 @@ if scd_tonemap is None:
         scd_tonemap = 0
 if credits_cpu is None:
     credits_cpu = cpu + 1
+if credits_q is None and encoder == 'rav1e':
+    credits_q = 180
+elif credits_q is None and encoder in ('svt', 'aom'):
+    credits_q = 32
+if q is None:
+    if encoder == 'rav1e':
+        q = 60
+    else:
+        q = 18
 if threads is None:
     if encoder == 'svt':
         threads = 4
@@ -882,14 +1025,82 @@ if graintable_sat is None:
         graintable_sat = 1.0
     else:
         graintable_sat = 0
-
+if lookahead is None:
+    if encoder == 'svt':
+        lookahead = 120
+    elif encoder == 'rav1e':
+        lookahead = 40
+    else:
+        lookahead = 64
 # Change the master-display and max-cll parameters to svt-av1 format if needed
 if master_display:
     if max_cll is None:
         max_cll = "0,0"
     master_display, max_cll = parse_master_display(master_display, max_cll)
 
-if encoder == 'svt':
+if encoder == 'rav1e':
+    default_values = {
+        "keyint": video_framerate * 10,
+        "photon-noise": noiselevel,
+        "threads": threads,
+        "rdo-lookahead-frames": lookahead,
+        "min-keyint": 5,
+    }
+    presets = {
+        "720p": {
+            "primaries": 'bt709',
+            "transfer": 'bt709',
+            "matrix": 'bt709',
+            "tile-cols": 0,
+            "tile-rows": 0,
+            "threads": 2,
+            # Add more parameters as needed
+        },
+        "1080p": {
+            "primaries": 'bt709',
+            "transfer": 'bt709',
+            "matrix": 'bt709',
+            "tile-cols": 0,
+            "tile-rows": 0,
+            "threads": 2,
+            # Add more parameters as needed
+        },
+        "1080p-hdr": {
+            "primaries": 'bt2020',
+            "transfer": 'smpte2084',
+            "matrix": 'bt2020ncl',
+            "mastering-display": master_display,
+            "content-light": max_cll,
+            "tile-cols": 0,
+            "tile-rows": 0,
+            "threads": 2,
+            # Add more parameters as needed
+        },
+        "1440p-hdr": {
+            "primaries": 'bt2020',
+            "transfer": 'smpte2084',
+            "matrix": 'bt2020ncl',
+            "mastering-display": master_display,
+            "content-light": max_cll,
+            "tile-cols": 1,
+            "tile-rows": 0,
+            "threads": 4,
+            # Add more parameters as needed
+        },
+        "2160p-hdr": {
+            "primaries": 'bt2020',
+            "transfer": 'smpte2084',
+            "matrix": 'bt2020ncl',
+            "mastering-display": master_display,
+            "content-light": max_cll,
+            "tile-cols": 2,
+            "tile-rows": 1,
+            "threads": 6,
+            # Add more parameters as needed
+        },
+        # Add more presets as needed
+    }.get(preset, {})
+elif encoder == 'svt':
     default_values = {
         "tune": 0,
         "enable-qm": 1,
@@ -906,18 +1117,23 @@ if encoder == 'svt':
         "chroma-v-dc-qindex-offset": -q + 2,
         "chroma-v-ac-qindex-offset": -q + 2,
         "key-frame-chroma-qindex-offset": -q + 2,
+        "lookahead": lookahead,
     }
     presets = {
         "720p": {
             "color-primaries": 1,
             "transfer-characteristics": 1,
             "matrix-coefficients": 1,
+            "tile-columns": 0,
+            "tile-rows": 0,
             # Add more parameters as needed
         },
         "1080p": {
             "color-primaries": 1,
             "transfer-characteristics": 1,
             "matrix-coefficients": 1,
+            "tile-columns": 0,
+            "tile-rows": 0,
             # Add more parameters as needed
         },
         "1080p-hdr": {
@@ -928,6 +1144,8 @@ if encoder == 'svt':
             "mastering-display": master_display,
             "content-light": max_cll,
             "enable-hdr": 1,
+            "tile-columns": 0,
+            "tile-rows": 0,
             # Add more parameters as needed
         },
         "1440p-hdr": {
@@ -938,6 +1156,8 @@ if encoder == 'svt':
             "mastering-display": master_display,
             "content-light": max_cll,
             "enable-hdr": 1,
+            "tile-columns": 1,
+            "tile-rows": 0,
             # Add more parameters as needed
         },
         "2160p-hdr": {
@@ -948,6 +1168,8 @@ if encoder == 'svt':
             "mastering-display": master_display,
             "content-light": max_cll,
             "enable-hdr": 1,
+            "tile-columns": 2,
+            "tile-rows": 1,
             # Add more parameters as needed
         },
         # Add more presets as needed
@@ -962,7 +1184,7 @@ else:
         "enable-chroma-deltaq": 1,
         "tune-content": tune_content,
         "tune": "ssim",
-        "lag-in-frames": 64,
+        "lag-in-frames": lookahead,
         "enable-qm": 1,
         "sb-size": "dynamic",
         "kf-min-dist": 5,
@@ -1020,7 +1242,7 @@ else:
             "color-primaries": "bt709",
             "transfer-characteristics": "bt709",
             "matrix-coefficients": "bt709",
-            "tile-columns": 1,
+            "tile-columns": 0,
             "tile-rows": 0,
             "max-partition-size": 32,
             "max-reference-frames": 4,
@@ -1031,7 +1253,7 @@ else:
             "transfer-characteristics": "bt709",
             "matrix-coefficients": "bt709",
             "deltaq-mode": 6,
-            "tile-columns": 1,
+            "tile-columns": 0,
             "tile-rows": 0,
             "max-partition-size": 32,
             "ssim-rd-mult": 125,
@@ -1052,7 +1274,7 @@ else:
             "transfer-characteristics": "smpte2084",
             "matrix-coefficients": "bt2020ncl",
             "deltaq-mode": 5,
-            "tile-columns": 1,
+            "tile-columns": 0,
             "tile-rows": 0,
             "max-partition-size": 32,
             "max-reference-frames": 4,
@@ -1063,7 +1285,7 @@ else:
             "transfer-characteristics": "smpte2084",
             "matrix-coefficients": "bt2020ncl",
             "deltaq-mode": 6,
-            "tile-columns": 1,
+            "tile-columns": 0,
             "tile-rows": 0,
             "max-partition-size": 32,
             "ssim-rd-mult": 125,
@@ -1085,7 +1307,7 @@ else:
             "matrix-coefficients": "bt2020ncl",
             "deltaq-mode": 5,
             "tile-columns": 1,
-            "tile-rows": 1,
+            "tile-rows": 0,
             "max-partition-size": 32,
             "max-reference-frames": 4,
             # Add more parameters as needed
@@ -1096,7 +1318,7 @@ else:
             "matrix-coefficients": "bt2020ncl",
             "deltaq-mode": 6,
             "tile-columns": 1,
-            "tile-rows": 1,
+            "tile-rows": 0,
             "max-partition-size": 32,
             "ssim-rd-mult": 125,
             "luma-bias": 24,
@@ -1116,7 +1338,7 @@ else:
             "transfer-characteristics": "smpte2084",
             "matrix-coefficients": "bt2020ncl",
             "deltaq-mode": 5,
-            "tile-columns": 1,
+            "tile-columns": 2,
             "tile-rows": 1,
             "max-partition-size": 32,
             "max-reference-frames": 4,
@@ -1127,7 +1349,7 @@ else:
             "transfer-characteristics": "smpte2084",
             "matrix-coefficients": "bt2020ncl",
             "deltaq-mode": 6,
-            "tile-columns": 1,
+            "tile-columns": 2,
             "tile-rows": 1,
             "max-partition-size": 32,
             "ssim-rd-mult": 125,
@@ -1168,7 +1390,7 @@ for key, value in vars(args).items():
         encode_params[param_key] = value
 
 # Create a list of non-empty parameters in the encoder supported format
-if encoder == 'svt':
+if encoder in ('svt', 'rav1e'):
     encode_params = [f"--{key} {value}" for key, value in encode_params.items() if value is not None]
 else:
     encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
@@ -1212,6 +1434,12 @@ if encoder == 'svt':
         encode_params.append(f"--fgs-table \"{output_grain_table}\"")
     elif graintable:
         encode_params.append(f"--fgs-table \"{graintable}\"")
+elif encoder == 'rav1e':
+    if graintable_method > 0:
+        create_fgs_table(encode_params)
+        encode_params.append(f"--film-grain-table \"{output_grain_table}\"")
+    elif graintable:
+        encode_params.append(f"--film-grain-table \"{graintable}\"")
 else:
     if graintable_method > 0:
         create_fgs_table(encode_params)
