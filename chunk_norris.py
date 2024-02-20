@@ -1,8 +1,8 @@
 # Chunk Norris
 #
-# A very simple Python script to do chunked encoding using an AV1 CLI encoder.
+# A very simple Python script to do chunked encoding using an AV1 or x265 CLI encoder.
 #
-# Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended) or svt-av1
+# Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended), svt-av1, rav1e or x265
 # Make sure you have ffmpeg and the encoder in PATH or where you run the script.
 #
 # Set common parameters in default_params and add/edit the presets as needed.
@@ -19,14 +19,7 @@ import argparse
 import csv
 import ffmpeg
 import math
-import signal
 from tqdm import tqdm
-
-
-def handle_ctrl_c():
-    print("Ctrl+C received, terminating processes...")
-    executor.shutdown(wait=False)  # Terminate the ThreadPoolExecutor
-    os._exit(1)  # Exit the script forcefully
 
 
 def get_video_props(video_path):
@@ -37,12 +30,13 @@ def get_video_props(video_path):
         video_length = int(video_stream['nb_frames'])
         video_framerate = str(video_stream['r_frame_rate'])
         num, denom = map(int, video_framerate.split('/'))
+        fr = float(num/denom)
         video_framerate = int(math.ceil(num/denom))
         try:
             video_transfer = str(video_stream['color_transfer'])
         except:
             video_transfer = 'unknown'
-        return video_width, video_length, video_transfer, video_framerate
+        return video_width, video_length, video_transfer, video_framerate, fr
     else:
         print("No video stream found in the input video.")
         return None
@@ -317,7 +311,7 @@ def create_fgs_table(encode_params):
 
         if encoder == 'rav1e':
             encode_params_grain = [x.replace(f'--threads {threads}', '--threads 0') for x in encode_params]
-            aomenc_command_grain = [
+            enc_command_grain = [
                 "rav1e.exe",
                 *encode_params_grain,
                 f"--speed {cpu}",
@@ -328,7 +322,7 @@ def create_fgs_table(encode_params):
             ]
         elif encoder == 'svt':
             encode_params_grain = [x.replace(f'--lp {threads}', '--lp 0') for x in encode_params]
-            aomenc_command_grain = [
+            enc_command_grain = [
                 "svtav1encapp.exe",
                 *encode_params_grain,
                 f"--preset {cpu}",
@@ -337,7 +331,7 @@ def create_fgs_table(encode_params):
                 "-i -"
             ]
         else:
-            aomenc_command_grain = [
+            enc_command_grain = [
                 "aomenc.exe",
                 "--ivf",
                 *encode_params,
@@ -365,12 +359,12 @@ def create_fgs_table(encode_params):
             output_grain_file_encoded
         ]
 
-        # print (avs2yuv_command_grain, aomenc_command_grain)
+        # print (avs2yuv_command_grain, enc_command_grain)
         avs2yuv_command_grain = ' '.join(avs2yuv_command_grain)
-        aomenc_command_grain = ' '.join(aomenc_command_grain)
+        enc_command_grain = ' '.join(enc_command_grain)
         print("Encoding the FGS analysis AV1 file.\n")
         avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
-        aomenc_grain_process = subprocess.Popen(aomenc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
+        aomenc_grain_process = subprocess.Popen(enc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
         aomenc_grain_process.communicate()
 
         print("\n\nEncoding the FGS analysis lossless file.\n")
@@ -623,19 +617,26 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
     chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in chunklist}
 
     for i in chunklist:
-        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
+        if encoder != 'x265':
+            output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
+        else:
+            output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.hevc")
         input_files.append(output_chunk)  # Add the input file for concatenation
 
     chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
 
     for i in chunklist:
         scene_script_file = os.path.join(scripts_folder, f"scene_{i['chunk']}.avs")
-        output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
+        if encoder != 'x265':
+            output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
+        else:
+            output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.hevc")
         # Create the Avisynth script for this scene
         with open(scene_script_file, "w") as scene_script:
             scene_script.write(f'Import("{encode_script}")\n')
             scene_script.write(f"Trim({i['start']}, {i['end']})\n")
-            scene_script.write('ConvertBits(10)') # workaround to aomenc bug with 8-bit input and film grain table
+            if encoder != 'x265':
+                scene_script.write('ConvertBits(10)')  # workaround to aomenc bug with 8-bit input and film grain table
 
         if decode_method == 0:
             avs2yuv_command = [
@@ -657,7 +658,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
 
         if encoder == 'rav1e':
             if i['credits'] == 0:
-                aomenc_command = [
+                enc_command = [
                     "rav1e.exe",
                     *encode_params,
                     "-q",
@@ -667,9 +668,9 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "-o", '"' + output_chunk + '"',
                     "-",
                     "2> nul"
-            ]
+                ]
             else:
-                aomenc_command = [
+                enc_command = [
                     "rav1e.exe",
                     *encode_params,
                     "-q",
@@ -680,7 +681,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 ]
         elif encoder == 'svt':
             if i['credits'] == 0:
-                aomenc_command = [
+                enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
                     f"--preset {cpu}",
@@ -690,7 +691,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "2> nul"
                 ]
             else:
-                aomenc_command = [
+                enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
                     f"--preset {credits_cpu}",
@@ -699,9 +700,9 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "-i -",
                     "2> nul"
                 ]
-        else:
+        elif encoder == 'aom':
             if i['credits'] == 0:
-                aomenc_command = [
+                enc_command = [
                     "aomenc.exe",
                     "-q",
                     "--ivf",
@@ -713,7 +714,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "-"
                 ]
             else:
-                aomenc_command = [
+                enc_command = [
                     "aomenc.exe",
                     "-q",
                     "--ivf",
@@ -724,8 +725,33 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "-o", '"' + output_chunk + '"',
                     "-"
                 ]
+        else:
+            if i['credits'] == 0:
+                enc_command = [
+                    "x265.exe",
+                    "--y4m",
+                    "--no-progress",
+                    "--log-level", "-1",
+                    *encode_params,
+                    "--dither",
+                    f"--crf {q}",
+                    "--output", '"'+output_chunk+'"',
+                    "--input", "-"
+                ]
+            else:
+                enc_command = [
+                    "x265.exe",
+                    "--y4m",
+                    "--no-progress",
+                    "--log-level", "-1",
+                    *encode_params,
+                    "--dither",
+                    f"--crf {credits_q}",
+                    "--output", '"' + output_chunk + '"',
+                    "--input", "-"
+                ]
 
-        encode_commands.append((avs2yuv_command, aomenc_command, output_chunk))
+        encode_commands.append((avs2yuv_command, enc_command, output_chunk))
     return encode_commands, input_files, chunklist, chunklist_dict
 
 
@@ -768,32 +794,164 @@ def parse_master_display(master_display, max_cll):
     # Remove quotes from the result
     processed_string = processed_string.replace('"', '')
     max_cll = max_cll.replace('"', '')
-    print(processed_string, max_cll)
+    # print(processed_string, max_cll)
 
     return processed_string, max_cll
 
 
 # Function to execute encoding commands and print them for debugging
 def run_encode_command(command):
-    avs2yuv_command, aomenc_command, output_chunk = command
+    avs2yuv_command, enc_command, output_chunk = command
     avs2yuv_command = " ".join(avs2yuv_command)
-    aomenc_command = " ".join(aomenc_command)
+    enc_command = " ".join(enc_command)
 
     # Print the encoding command for debugging
-    # print(f"\naomenc command: {aomenc_command}")
+    # print(f"\nEncoder command: {enc_command}")
 
     # Execute avs2yuv and pipe the output to the encoder
     avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
-    aomenc_process = subprocess.Popen(aomenc_command, stdin=avs2yuv_process.stdout, shell=True)
+    enc_process = subprocess.Popen(enc_command, stdin=avs2yuv_process.stdout, shell=True)
 
     # Wait for the encoder to finish
-    aomenc_process.communicate()
+    enc_process.communicate()
 
-    if aomenc_process.returncode != 0:
+    if enc_process.returncode != 0:
         print("Error in encoder processing, chunk", output_chunk)
-        print("Return code:", aomenc_process.returncode)
+        print("Return code:", enc_process.returncode)
 
     return output_chunk
+
+
+def encode_sample(output_folder, encode_script):
+    sample_script_file = os.path.join(output_folder, "sample.avs")
+    if encoder != 'x265':
+        output_chunk = os.path.join(output_folder, "sample.ivf")
+    else:
+        output_chunk = os.path.join(output_folder, "sample.hevc")
+    # Create the Avisynth script for this scene
+    with open(sample_script_file, "w") as sample_script:
+        sample_script.write(f'Import("{encode_script}")\n')
+        sample_script.write(f"Trim({sample_start_frame}, {sample_end_frame})\n")
+        if encoder != 'x265':
+            sample_script.write('ConvertBits(10)')  # workaround to aomenc bug with 8-bit input and film grain table
+
+    if decode_method == 0:
+        avs2yuv_command_sample = [
+            "avs2yuv64.exe",
+            "-no-mt",
+            '"' + sample_script_file + '"',  # Use the Avisynth script for this scene
+            "-",
+            "2> nul"
+        ]
+    else:
+        avs2yuv_command_sample = [
+            "ffmpeg.exe",
+            "-loglevel", "fatal",
+            "-i", '"' + sample_script_file + '"',
+            "-f", "yuv4mpegpipe",
+            "-strict", "-1",
+            "-"
+        ]
+
+    if encoder == 'rav1e':
+        enc_command_sample = [
+            "rav1e.exe",
+            *encode_params,
+            f"--speed {cpu}",
+            f"--quantizer {q}",
+            "--no-scene-detection",
+            "-o", '"' + output_chunk + '"',
+            "-"
+        ]
+    elif encoder == 'svt':
+        enc_command_sample = [
+            "svtav1encapp.exe",
+            *encode_params,
+            f"--preset {cpu}",
+            f"--crf {q}",
+            "-b", '"' + output_chunk + '"',
+            "-i -"
+        ]
+    elif encoder == 'aom':
+        enc_command_sample = [
+            "aomenc.exe",
+            "--ivf",
+            f"--cpu-used={cpu}",
+            *encode_params,
+            "--passes=1",
+            f"--cq-level={q}",
+            "-o", '"' + output_chunk + '"',
+            "-"
+        ]
+    else:
+        enc_command_sample = [
+            "x265.exe",
+            "--y4m",
+            *encode_params,
+            "--dither",
+            f"--crf {q}",
+            "--output", '"' + output_chunk + '"',
+            "--input", "-"
+        ]
+
+    avs2yuv_command_sample = ' '.join(avs2yuv_command_sample)
+    enc_command_sample = ' '.join(enc_command_sample)
+    print("Encoding the sample file.\n")
+    avs2yuv_sample_process = subprocess.Popen(avs2yuv_command_sample, stdout=subprocess.PIPE, shell=True)
+    enc_sample_process = subprocess.Popen(enc_command_sample, stdin=avs2yuv_sample_process.stdout, shell=True)
+    enc_sample_process.communicate()
+    print("Path for the sample is:", output_chunk)
+
+
+def concatenate(chunks_folder, input_files, output_final_ffmpeg, fr):
+    # Create a list file for input files
+    input_list_txt = os.path.join(chunks_folder, "input_list.txt")
+
+    # Write the input file list to the text file
+    with open(input_list_txt, "w") as file:
+        for input_file in input_files:
+            file.write(f"file '{input_file}'\n")
+
+    # Define the ffmpeg concatenation command
+    if encoder != 'x265':
+        ffmpeg_concat_command = [
+            "ffmpeg.exe",
+            "-loglevel", "warning",
+            "-f", "concat",
+            "-safe", "0",  # Allow absolute paths
+            "-i", input_list_txt,
+            "-c", "copy",
+            "-strict", "strict",
+            "-map", "0",
+            "-y",  # Overwrite output file if it exists
+            output_final_ffmpeg
+        ]
+    else:
+        ffmpeg_concat_command = [
+            "ffmpeg.exe",
+            "-loglevel", "error",
+            "-f", "concat",
+            "-safe", "0",  # Allow absolute paths
+            "-fflags", "+genpts",
+            "-r", str(fr),
+            "-i", input_list_txt,
+            "-c", "copy",
+            "-strict", "strict",
+            "-map", "0",
+            "-y",  # Overwrite output file if it exists
+            output_final_ffmpeg
+        ]
+
+    # Print the ffmpeg concatenation command for debugging
+    # print("Concatenation Command (ffmpeg):")
+    # print(" ".join(ffmpeg_concat_command))
+
+    print("Concatenating chunks using ffmpeg.\n")
+
+    # Run the ffmpeg concatenation command
+    subprocess.run(ffmpeg_concat_command)
+
+    print(f"Concatenated video saved as {output_final_ffmpeg}")
 
 
 parser = argparse.ArgumentParser()
@@ -819,7 +977,12 @@ parser.add_argument('--luma-bias', nargs='?', type=int)
 parser.add_argument('--luma-bias-strength', nargs='?', type=int)
 parser.add_argument('--luma-bias-midpoint', nargs='?', type=int)
 parser.add_argument('--deltaq-mode', nargs='?', type=int)
-parser.add_argument('--tf', nargs='?', default=1, type=int)
+parser.add_argument('--tf', nargs='?', default=0, type=int)
+parser.add_argument('--cdef', nargs='?', default=0, type=int)
+parser.add_argument('--restoration', nargs='?', default=0, type=int)
+parser.add_argument('--scm', nargs='?', default=2, type=int)
+parser.add_argument('--qm-min', nargs='?', default=5, type=int)
+parser.add_argument('--qm-max', nargs='?', default=9, type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
@@ -834,6 +997,9 @@ parser.add_argument('--credits-cpu', nargs='?', type=int)
 parser.add_argument('--master-display', nargs='?', type=str)
 parser.add_argument('--max-cll', nargs='?', type=str)
 parser.add_argument('--lookahead', nargs='?', type=int)
+parser.add_argument('--x265cl', nargs='?', type=str)
+parser.add_argument('--sample-start-frame', nargs='?', type=int)
+parser.add_argument('--sample-end-frame', nargs='?', type=int)
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -870,6 +1036,9 @@ luma_bias_strength = args.luma_bias_strength
 luma_bias_midpoint = args.luma_bias_midpoint
 deltaq_mode = args.deltaq_mode
 tf = args.tf
+cdef = args.cdef
+restoration = args.restoration
+scm = args.scm
 tplstrength = args.tpl_strength
 credits_start_frame = args.credits_start_frame
 credits_q = args.credits_q
@@ -877,15 +1046,20 @@ credits_cpu = args.credits_cpu
 master_display = args.master_display
 max_cll = args.max_cll
 lookahead = args.lookahead
+qm_min = args.qm_min
+qm_max = args.qm_max
+x265cl = args.x265cl
+sample_start_frame = args.sample_start_frame
+sample_end_frame = args.sample_end_frame
 
 # Sanity checks of parameters, no thanks to Python argparse being stupid if the allowed range is big
 if encode_script is None:
     print("You need to supply a script to encode.\n")
     sys.exit(1)
-elif encoder not in ('rav1e', 'svt', 'aom'):
-    print("Valid encoder choices are rav1e, svt or aom.\n")
+elif encoder not in ('rav1e', 'svt', 'aom', 'x265'):
+    print("Valid encoder choices are rav1e, svt, aom or x265.\n")
     sys.exit(1)
-elif encoder in ('svt', 'aom') and 2 > q > 64:
+elif encoder in ('svt', 'aom', 'x265') and 2 > q > 64:
     print("Q must be 2-64.\n")
     sys.exit(1)
 elif encoder == 'rav1e' and 0 > q > 255:
@@ -939,6 +1113,15 @@ elif deltaq_mode and 0 > deltaq_mode > 6:
 elif 0 > tf > 1:
     print("Tf must be 0 or 1.\n")
     sys.exit(1)
+elif 0 > cdef > 1:
+    print("Cdef must be 0 or 1.\n")
+    sys.exit(1)
+elif 0 > restoration > 1:
+    print("Restoration must be 0 or 1.\n")
+    sys.exit(1)
+elif 0 > scm > 2:
+    print("Scm must be 0-2.\n")
+    sys.exit(1)
 elif 0 > graintable_method > 1:
     print("Graintable method must be 0 or 1.\n")
     sys.exit(1)
@@ -972,15 +1155,24 @@ elif credits_cpu and -1 > credits_cpu > 11:
 elif lookahead and 0 > lookahead > 120:
     print("Lookahead must be 0-120.\n")
     sys.exit(1)
+elif (qm_min and 0 > qm_min > 15) or (qm_max and 0 > qm_max > 15):
+    print("Qm-min or qtm-max must be 0-15.\n")
+    sys.exit(1)
+elif preset not in ('ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow', 'placebo') and encoder == 'x265':
+    print("Incorrect preset for x265.\n")
+    sys.exit(1)
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
 
 # Get video props from the source
-video_width, video_length, video_transfer, video_framerate = get_video_props(encode_script)
+video_width, video_length, video_transfer, video_framerate, fr = get_video_props(encode_script)
 
-if credits_start_frame is not None and credits_start_frame >= video_length - 1:
+if credits_start_frame and credits_start_frame >= video_length - 1:
     print("The credits cannot start at or after the end of video.\n")
+    sys.exit(1)
+if (sample_start_frame and sample_start_frame >= video_length - 1) or (sample_end_frame and sample_end_frame >= video_length - 1) or (sample_start_frame and sample_end_frame and sample_start_frame >= sample_end_frame):
+    print("Please check the sample range.\n")
     sys.exit(1)
 
 # Set scene change helper file to use the same path as the original source script
@@ -991,7 +1183,7 @@ if noiselevel is None or graintable or graintable_method > 0:
     if encoder in ('svt', 'aom'):
         noiselevel = 0
     else:
-        noiselevel is None
+        noiselevel = None
 if graintable:
     graintable_method = 0
 if scdthresh is None:
@@ -1010,6 +1202,8 @@ if credits_q is None and encoder == 'rav1e':
     credits_q = 180
 elif credits_q is None and encoder in ('svt', 'aom'):
     credits_q = 32
+elif credits_q is None and encoder == 'x265':
+    credits_q = q + 8
 if q is None:
     if encoder == 'rav1e':
         q = 60
@@ -1021,13 +1215,13 @@ if threads is None:
     else:
         threads = 6
 if graintable_sat is None:
-    if encoder == 'svt':
+    if encoder in ('svt', 'rav1e'):
         graintable_sat = 1.0
     else:
         graintable_sat = 0
 if lookahead is None:
     if encoder == 'svt':
-        lookahead = 120
+        lookahead = None
     elif encoder == 'rav1e':
         lookahead = 40
     else:
@@ -1102,21 +1296,19 @@ if encoder == 'rav1e':
     }.get(preset, {})
 elif encoder == 'svt':
     default_values = {
-        "tune": 0,
+        "tune": tune,
         "enable-qm": 1,
-        "qm-min": 5,
-        "qm-max": 9,
+        "qm-min": qm_min,
+        "qm-max": qm_max,
         "keyint": "10s",
-        "enable-cdef": 0,
+        "enable-cdef": cdef,
+        "enable-restoration": restoration,
         "enable-tf": tf,
+        "scm": scm,
+        "sharpness": sharpness,
         "film-grain": noiselevel,
         "film-grain-denoise": 0,
         "lp": threads,
-        "chroma-u-dc-qindex-offset": -q + 2,
-        "chroma-u-ac-qindex-offset": -q + 2,
-        "chroma-v-dc-qindex-offset": -q + 2,
-        "chroma-v-ac-qindex-offset": -q + 2,
-        "key-frame-chroma-qindex-offset": -q + 2,
         "lookahead": lookahead,
     }
     presets = {
@@ -1174,6 +1366,14 @@ elif encoder == 'svt':
         },
         # Add more presets as needed
     }.get(preset, {})
+elif encoder == 'x265':
+    default_values = {
+        "preset": preset,
+        "frame-threads": 1,
+        "pools": threads,
+        "keyint": video_framerate * 10,
+    }
+    presets = {}
 else:
     default_values = {
         "threads": threads,
@@ -1186,6 +1386,8 @@ else:
         "tune": "ssim",
         "lag-in-frames": lookahead,
         "enable-qm": 1,
+        "qm-min": qm_min,
+        "qm-max": qm_max,
         "sb-size": "dynamic",
         "kf-min-dist": 5,
         "kf-max-dist": video_framerate * 10,
@@ -1196,7 +1398,8 @@ else:
         "tile-columns": tile_columns,
         "tile-rows": tile_rows,
         "sharpness": sharpness,
-        "enable-cdef": 0,
+        "enable-cdef": cdef,
+        "enable-restoration": restoration,
         "enable-fwd-kf": 0,
         "arnr-strength": arnr_strength,
         "arnr-maxframes": arnr_maxframes,
@@ -1204,7 +1407,6 @@ else:
         "enable-global-motion": 0,
         "max-reference-frames": max_reference_frames,
     }
-
     # Define presets as dictionaries of encoder parameters
     presets = {
         "720p": {
@@ -1368,7 +1570,7 @@ else:
         # Add more presets as needed
     }.get(preset, {})
 
-if not presets:
+if not presets and encoder != 'x265':
     print("No matching preset found.\n")
     sys.exit(1)
 
@@ -1390,10 +1592,13 @@ for key, value in vars(args).items():
         encode_params[param_key] = value
 
 # Create a list of non-empty parameters in the encoder supported format
-if encoder in ('svt', 'rav1e'):
+if encoder in ('svt', 'rav1e', 'x265'):
     encode_params = [f"--{key} {value}" for key, value in encode_params.items() if value is not None]
 else:
     encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
+
+if encoder == 'x265' and x265cl:
+    encode_params.append(x265cl)
 
 # print (encode_params)
 
@@ -1418,34 +1623,44 @@ os.makedirs(chunks_folder, exist_ok=True)
 
 # Define final video file name
 output_name = os.path.splitext(os.path.basename(encode_script))[0]
-output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
-
-# Generate the FGS analysis file names
-output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
-output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.ivf")
-output_grain_table = os.path.split(encode_script)[0]
-output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
-output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
-
-# Create the reference files for FGS
-if encoder == 'svt':
-    if graintable_method > 0:
-        create_fgs_table(encode_params)
-        encode_params.append(f"--fgs-table \"{output_grain_table}\"")
-    elif graintable:
-        encode_params.append(f"--fgs-table \"{graintable}\"")
-elif encoder == 'rav1e':
-    if graintable_method > 0:
-        create_fgs_table(encode_params)
-        encode_params.append(f"--film-grain-table \"{output_grain_table}\"")
-    elif graintable:
-        encode_params.append(f"--film-grain-table \"{graintable}\"")
+if encoder != 'x265':
+    output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
 else:
-    if graintable_method > 0:
-        create_fgs_table(encode_params)
-        encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
-    elif graintable:
-        encode_params.append(f"--film-grain-table=\"{graintable}\"")
+    output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mp4")
+
+# Grain table creation, only for AV1
+if encoder != 'x265':
+    # Generate the FGS analysis file names
+    output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
+    output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.ivf")
+    output_grain_table = os.path.split(encode_script)[0]
+    output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
+    output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
+
+    # Create the reference files for FGS
+    if encoder == 'svt':
+        if graintable_method > 0:
+            create_fgs_table(encode_params)
+            encode_params.append(f"--fgs-table \"{output_grain_table}\"")
+        elif graintable:
+            encode_params.append(f"--fgs-table \"{graintable}\"")
+    elif encoder == 'rav1e':
+        if graintable_method > 0:
+            create_fgs_table(encode_params)
+            encode_params.append(f"--film-grain-table \"{output_grain_table}\"")
+        elif graintable:
+            encode_params.append(f"--film-grain-table \"{graintable}\"")
+    else:
+        if graintable_method > 0:
+            create_fgs_table(encode_params)
+            encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
+        elif graintable:
+            encode_params.append(f"--film-grain-table=\"{graintable}\"")
+
+# Encode only the sample if start and end frames are supplied, exit afterwards.
+if sample_start_frame and sample_end_frame:
+    encode_sample(output_folder, encode_script)
+    sys.exit(0)
 
 # Detect scene changes
 scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
@@ -1462,53 +1677,32 @@ chunklist = []  # Helper list for producing the encoding and concatenation lists
 completed_chunks = []  # List of completed chunks
 
 # Run encoding commands with a set maximum of concurrent processes
-signal.signal(signal.SIGINT, handle_ctrl_c)
+processed_length = 0.0
+total_filesize_kbits = 0.0
+avg_bitrate = 0.0
 encode_commands, input_files, chunklist, chunklist_dict = preprocess_chunks(encode_commands, input_files, chunklist)
 progress_bar = tqdm(total=video_length, desc="Progress", unit="frames", smoothing=0)
 
 with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
     futures = {executor.submit(run_encode_command, cmd): cmd for cmd in encode_commands}
-    for future in concurrent.futures.as_completed(futures):
-        output_chunk = future.result()
-        parts = output_chunk.split('_')
-        chunk_number = int(str(parts[-1].split('.')[0]))
-        progress_bar.update(chunklist_dict.get(chunk_number))
-        completed_chunks.append(output_chunk)
-        # print(f"Encoding for scene completed: {output_chunk}")
+    try:
+        for future in concurrent.futures.as_completed(futures):
+            output_chunk = future.result()
+            parts = output_chunk.split('_')
+            chunk_number = int(str(parts[-1].split('.')[0]))
+            processed_length = processed_length + (chunklist_dict.get(chunk_number) / fr)
+            total_filesize_kbits = total_filesize_kbits + (os.path.getsize(output_chunk) / 1024 * 8)
+            avg_bitrate = str(round(total_filesize_kbits / processed_length, 2))
+            progress_bar.update(chunklist_dict.get(chunk_number))
+            progress_bar.set_postfix({'Rate': avg_bitrate})
+            completed_chunks.append(output_chunk)
+            # print(f"Encoding for scene completed: {output_chunk}")
+    except:
+        print("Something went wrong while encoding, exiting!\n")
+        os._exit(1)
 
 # Wait for all encoding processes to finish before concatenating
 progress_bar.close()
 print("Encoding for all scenes completed.\n")
 
-# Create a list file for input files
-input_list_txt = os.path.join(chunks_folder, "input_list.txt")
-
-# Write the input file list to the text file
-with open(input_list_txt, "w") as file:
-    for input_file in input_files:
-        file.write(f"file '{input_file}'\n")
-
-# Define the ffmpeg concatenation command
-ffmpeg_concat_command = [
-    "ffmpeg.exe",
-    "-loglevel", "warning",
-    "-f", "concat",
-    "-safe", "0",  # Allow absolute paths
-    "-i", input_list_txt,
-    "-c", "copy",
-    "-strict", "strict",
-    "-map", "0",
-    "-y",  # Overwrite output file if it exists
-    output_final_ffmpeg
-]
-
-# Print the ffmpeg concatenation command for debugging
-# print("Concatenation Command (ffmpeg):")
-# print(" ".join(ffmpeg_concat_command))
-
-print("Concatenating chunks using ffmpeg.\n")
-
-# Run the ffmpeg concatenation command
-subprocess.run(ffmpeg_concat_command)
-
-print(f"Concatenated video saved as {output_final_ffmpeg}")
+concatenate(chunks_folder, input_files, output_final_ffmpeg, fr)
