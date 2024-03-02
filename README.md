@@ -42,6 +42,8 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 **SVT-AV1 binaries to use with this script**: https://discord.gg/rV6j9fJ4 -> #software
 - if you use svt-av1 to encode, use the latest psy binaries to ensure the highest quality
 
+**NOTE: x265 tends to be flaky, depending on your Avisynth script. Consider it experimental!**
+
 ---
 
 
@@ -62,7 +64,7 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
 6. You can control the amount of parallel encodes by a CLI parameter. Tune the amount according to your system, both CPU and memory-wise.
    
-7. The encoded chunks are concatenated in their original order to a Matroska (AV1) or MP4 (HEVC) container using ffmpeg. I couldn't get MKV muxing working properly on raw HEVC streams so had to resort to MP4 muxing. Nevertheless, you probably will remux the files anyway to add sound, subs etc.
+7. The encoded chunks are concatenated in their original order to a Matroska (AV1, HEVC with mkvmerge) or MP4 (HEVC with ffmpeg) container.
 
 ---
 
@@ -204,6 +206,17 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --qm-max 15
 - Default: 9
 
+**--variance-boost-strength**: Defines the strength of variance boost for low and medium contrast blocks. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2105 for more details. The default value is good in most cases, try 3 if the material has more contrast variance.
+- Example: --variance-boost-strength 3
+- Default: 2
+
+**--variance-octile**: Defines the level of low/med contrast detection. Lower values will apply boost in more blocks, but may result in false positives.
+- Example: --variance-octile 2
+- Default: 6
+
+**--enable-alt-curve**: Enables the alternative curve for variance boosting. Possibly better for animation, experimental.
+- Default: not set
+
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
 - --graintable-method 0 skips creation.
 - --graintable-method 1 creates a table based on a user set range.
@@ -214,7 +227,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--graintable-sat**: Defines the level of saturation to have in the graintable analysis clip. The recommended range is 0..1 where 0 means black-and-white and 1 does nothing. Uses the Avisynth+ built-in filter "Tweak".
 - Example: --graintable-sat 0.2
-- Default: 0 for aomenc, 1.0 for svt-av1
+- Default: 0 for aomenc, 0.5 for svt-av1
 
 **--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
 The lower resolution tables often contain a little more, or sharper grain compared to the higher resolution counterparts.
@@ -264,8 +277,6 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Default: cpu + 1
 
 **--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
-
-
 **NOTE:** If you use DGIndexNV to index the source file, you can copy-paste the data from the end of the .dgi file for these parameters and the script will automatically adjust the values according to what svt-av1 expects.
 
 For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing.
@@ -284,6 +295,12 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 **--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used so you can validate for example the film grain/photon noise level using this parameter pair.
 - Example: --sample-start-frame 10200 --sample-end-frame 10500
 - Default: None
+
+**--rpu**: Path to the Dolby Vision RPU file, enables Dolby Vision encoding mode. The script will split the RPU based on the chunks. Note that you need to have mkvmerge in PATH in order to be able to use the DoVi mode, ffmpeg loses the metadata when joining chunks at the end.
+- Example: --rpu c:\encoding\rpus\movie_rpu.bin
+- Default: None
+
+**--cudasynth**: If you are using Donald Graft's CUDASynth version of DGDecode, you can enable this option for better performance in both hardware decoding and tonemapping HDR to SDR for scene change detection.
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 

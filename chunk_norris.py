@@ -2,7 +2,6 @@
 #
 # A very simple Python script to do chunked encoding using an AV1 or x265 CLI encoder.
 #
-# Requirements: Python 3.10.x (possibly just 3.x), scene change list in x264/x265 QP file format, Avisynth, avs2yuv64, ffmpeg, aomenc (the lavish mod recommended), svt-av1, rav1e or x265
 # Make sure you have ffmpeg and the encoder in PATH or where you run the script.
 #
 # Set common parameters in default_params and add/edit the presets as needed.
@@ -19,6 +18,7 @@ import argparse
 import csv
 import ffmpeg
 import math
+import json
 from tqdm import tqdm
 
 
@@ -92,6 +92,9 @@ def create_scxvid_file(scene_change_csv):
         with open(encode_script, 'r') as file:
             # Read the first line from the original file
             source = file.readline()
+            if scd_tonemap != 0 and cudasynth and "dgsource" in source.lower():
+                source = source.replace(".dgi\",", ".dgi\",h2s_enable=1,")
+                source = source.replace(".dgi\")", ".dgi\",h2s_enable=1)")
         with open(scd_script, 'w') as scd_file:
             # Write the first line content to the new file
             scd_file.write(source)
@@ -99,14 +102,23 @@ def create_scxvid_file(scene_change_csv):
                 scd_file.write('\n')
                 scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                 scd_file.write('Crop(16,16,-16,-16)\n')
-            if scd_tonemap != 0:
+            if scd_tonemap != 0 and not cudasynth:
                 scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)\n')
+            scd_file.write('ConvertBits(8)\n')
             scd_file.write(f'SCXvid(log="{scene_change_csv}")')
     else:
+        with open(encode_script, 'r') as file:
+            # Read the first line from the original file
+            source = file.readlines()
+            for i in range(len(source)):
+                if scd_tonemap != 0 and cudasynth and "dgsource" in source[i].lower():
+                    source[i] = source[i].replace(".dgi\",", ".dgi\",h2s_enable=1,")
+                    source[i] = source[i].replace(".dgi\")", ".dgi\",h2s_enable=1)")
         with open(scd_script, 'w') as scd_file:
-            scd_file.write(f'Import("{encode_script}")\n')
-            if scd_tonemap != 0:
+            scd_file.writelines(source)
+            if scd_tonemap != 0 and not cudasynth:
                 scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)\n')
+            scd_file.write(f'\nConvertBits(bits=8)\n')
             scd_file.write(f'SCXvid(log="{scene_change_csv}")')
 
     scene_change_command = [
@@ -187,6 +199,11 @@ def ffscd(scd_script):
 
         with open(scene_change_csv, "r") as csv_file:
             for line in csv_file:
+                if "error" in line:
+                    print("Scene change detection reported an error, exiting.")
+                    print(f"Error message: {line}")
+                    print(f"More details in {scene_change_csv}.")
+                    sys.exit(1)
                 if "Stream #0:" in line and "fps," in line:
                     # Extract frame rate using regular expression
                     match = re.search(r"(\d+\.\d+)\s*fps,", line)
@@ -448,6 +465,9 @@ def scene_change_detection(scd_script):
             with open(encode_script, 'r') as file:
                 # Read the first line from the original file
                 source = file.readline()
+                if scd_tonemap != 0 and cudasynth and "dgsource" in source.lower():
+                    source = source.replace(".dgi\",", ".dgi\",h2s_enable=1,")
+                    source = source.replace(".dgi\")", ".dgi\",h2s_enable=1)")
                 with open(scd_script, 'w') as scd_file:
                     # Write the first line content to the new file
                     scd_file.write(source)
@@ -455,7 +475,7 @@ def scene_change_detection(scd_script):
                         scd_file.write('\n')
                         scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                         scd_file.write('Crop(16,16,-16,-16)')
-                    if scd_tonemap != 0:
+                    if scd_tonemap != 0 and not cudasynth:
                         scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
             scene_changes = ffscd(scd_script)
         else:
@@ -473,13 +493,15 @@ def scene_change_detection(scd_script):
             with open(encode_script, 'r') as file:
                 # Read the first line from the original file
                 source = file.readline()
+                if scd_tonemap != 0 and cudasynth and "dgsource" in source.lower():
+                    source = source.replace(".dgi\",", ".dgi\",h2s_enable=1,")
+                    source = source.replace(".dgi\")", ".dgi\",h2s_enable=1)")
                 with open(scd_script, 'w') as scd_file:
                     # Write the first line content to the new file
                     scd_file.write(source)
-                    scd_file.write('\n')
-                    scd_file.write(f'Spline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
+                    scd_file.write(f'\nSpline16Resize(width()/{downscale_scd},height()/{downscale_scd})\n')
                     scd_file.write('Crop(16,16,-16,-16)')
-                    if scd_tonemap != 0:
+                    if scd_tonemap != 0 and not cudasynth:
                         scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
             pyscd(scd_script)
         else:
@@ -543,6 +565,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
         chunk_number = 1
         i = 0
         combined = False
+        next_scene_index = None
         while i < len(scene_changes):
             start_frame = scene_changes[i]
             if i < len(scene_changes) - 1:
@@ -605,13 +628,23 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 start_frame = int(row[1]) - 1  # Second column
                 end_frame = int(row[4]) - 1  # Fifth column
                 chunk_length = int(row[7])  # Eighth column
-            chunkdata = {
-                'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame, 'credits': 0
-            }
-            chunklist.append(chunkdata)
+                chunkdata = {
+                    'chunk': chunk_number, 'length': chunk_length, 'start': start_frame, 'end': end_frame, 'credits': 0
+                }
+                chunklist.append(chunkdata)
 
     if credits_start_frame:
         chunklist = adjust_chunkdata(chunklist, credits_start_frame)
+
+    if rpu:
+        print("Splitting the RPU file based on chunks.\n")
+        # Use ThreadPoolExecutor for multithreading
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+            # Submit each chunk to the executor
+            futures = [executor.submit(process_rpu, i) for i in chunklist]
+            # Wait for all threads to complete
+            for future in futures:
+                future.result()
 
     # print (chunklist)
     chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in chunklist}
@@ -666,8 +699,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     f"--quantizer {q}",
                     "--no-scene-detection",
                     "-o", '"' + output_chunk + '"',
-                    "-",
-                    "2> nul"
+                    "-"
+                    # "2> nul"
                 ]
             else:
                 enc_command = [
@@ -687,8 +720,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     f"--preset {cpu}",
                     f"--crf {q}",
                     "-b", '"'+output_chunk+'"',
-                    "-i -",
-                    "2> nul"
+                    "-i -"
+                    # "2> nul"
                 ]
             else:
                 enc_command = [
@@ -697,9 +730,12 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     f"--preset {credits_cpu}",
                     f"--crf {credits_q}",
                     "-b", '"'+output_chunk+'"',
-                    "-i -",
-                    "2> nul"
+                    "-i -"
+                    # "2> nul"
                 ]
+            if rpu:
+                rpu_param = "--dolby-vision-rpu " + os.path.join(chunks_folder, f"scene_{i['chunk']}_rpu.bin")
+                enc_command.append(rpu_param)
         elif encoder == 'aom':
             if i['credits'] == 0:
                 enc_command = [
@@ -752,7 +788,44 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 ]
 
         encode_commands.append((avs2yuv_command, enc_command, output_chunk))
+    # print (encode_commands)
     return encode_commands, input_files, chunklist, chunklist_dict
+
+
+def process_rpu(i):
+    lastframe = video_length - 1
+    # for i in chunklist:
+    jsonpath = os.path.join(scripts_folder, f"scene_{i['chunk']}_rpu.json")
+    rpupath = os.path.join(chunks_folder, f"scene_{i['chunk']}_rpu.bin")
+    if i['chunk'] == 1:
+        start = i['end'] + 1
+        data = {
+            "remove": [f"{start}-{lastframe}"]
+        }
+    elif i['chunk'] < len(chunklist) + 1:
+        start = 0
+        end = i['start'] - 1
+        start_2 = i['end'] + 1
+        data = {
+            "remove": [f"{start}-{end}", f"{start_2}-{lastframe}"]
+        }
+    else:
+        start = 0
+        end = i['start'] - 1
+        data = {
+            "remove": [f"{start}-{end}"]
+        }
+    with open(jsonpath, 'w') as json_file:
+        json.dump(data, json_file, indent=2)
+
+    dovitool_command = [
+        "dovi_tool.exe",
+        "editor",
+        "-i", rpu,
+        "-j", jsonpath,
+        "-o", rpupath
+    ]
+    subprocess.run(dovitool_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def parse_master_display(master_display, max_cll):
@@ -810,7 +883,8 @@ def run_encode_command(command):
 
     # Execute avs2yuv and pipe the output to the encoder
     avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
-    enc_process = subprocess.Popen(enc_command, stdin=avs2yuv_process.stdout, shell=True)
+    # enc_process = subprocess.Popen(enc_command, stdin=avs2yuv_process.stdout, shell=True)
+    enc_process = subprocess.Popen(enc_command, stdin=avs2yuv_process.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 
     # Wait for the encoder to finish
     enc_process.communicate()
@@ -903,55 +977,95 @@ def encode_sample(output_folder, encode_script):
     print("Path for the sample is:", output_chunk)
 
 
-def concatenate(chunks_folder, input_files, output_final_ffmpeg, fr):
+def concatenate(chunks_folder, input_files, output_final, fr):
     # Create a list file for input files
     input_list_txt = os.path.join(chunks_folder, "input_list.txt")
 
     # Write the input file list to the text file
     with open(input_list_txt, "w") as file:
-        for input_file in input_files:
-            file.write(f"file '{input_file}'\n")
+        if use_mkvmerge:
+            for input_file in input_files:
+                file.write(f"{input_file}\n")
+        else:
+            for input_file in input_files:
+                file.write(f"file '{input_file}'\n")
 
-    # Define the ffmpeg concatenation command
-    if encoder != 'x265':
-        ffmpeg_concat_command = [
-            "ffmpeg.exe",
-            "-loglevel", "warning",
-            "-f", "concat",
-            "-safe", "0",  # Allow absolute paths
-            "-i", input_list_txt,
-            "-c", "copy",
-            "-strict", "strict",
-            "-map", "0",
-            "-y",  # Overwrite output file if it exists
-            output_final_ffmpeg
+    if use_mkvmerge:
+        mkvmerge_json_file = os.path.join(chunks_folder, "input_list.json")
+        with open(input_list_txt, "r") as input_file:
+            files = [line.strip() for line in input_file]
+        mkvmerge_json = [
+            "--ui-language",
+            "en",
+            "--output",
+            output_final,
+            "--language",
+            "0:und",
+            "--compression",
+            "0:none"
         ]
+
+        for file in files:
+            mkvmerge_json.extend(["(", file, ")", "+"])
+        mkvmerge_json.pop()  # Remove the trailing "+"
+        mkvmerge_json.extend([
+            "--append-to",
+            "1:0:0:0"
+        ])
+
+        with open(mkvmerge_json_file, "w") as json_file:
+            json.dump(mkvmerge_json, json_file, indent=2)
+
+        mkvmerge_concat_command = [
+            "mkvmerge.exe",
+            "-q",
+            f"@{mkvmerge_json_file}"
+        ]
+
+        print("Concatenating chunks using mkvmerge.\n")
+        subprocess.run(mkvmerge_concat_command)
+
     else:
-        ffmpeg_concat_command = [
-            "ffmpeg.exe",
-            "-loglevel", "error",
-            "-f", "concat",
-            "-safe", "0",  # Allow absolute paths
-            "-fflags", "+genpts",
-            "-r", str(fr),
-            "-i", input_list_txt,
-            "-c", "copy",
-            "-strict", "strict",
-            "-map", "0",
-            "-y",  # Overwrite output file if it exists
-            output_final_ffmpeg
-        ]
+        # Define the ffmpeg concatenation command
+        if encoder != 'x265':
+            ffmpeg_concat_command = [
+                "ffmpeg.exe",
+                "-loglevel", "warning",
+                "-f", "concat",
+                "-safe", "0",  # Allow absolute paths
+                "-i", input_list_txt,
+                "-c", "copy",
+                "-strict", "strict",
+                "-map", "0",
+                "-y",  # Overwrite output file if it exists
+                output_final
+            ]
+        else:
+            ffmpeg_concat_command = [
+                "ffmpeg.exe",
+                "-loglevel", "error",
+                "-f", "concat",
+                "-safe", "0",  # Allow absolute paths
+                "-fflags", "+genpts",
+                "-r", str(fr),
+                "-i", input_list_txt,
+                "-c", "copy",
+                "-strict", "strict",
+                "-map", "0",
+                "-y",  # Overwrite output file if it exists
+                output_final
+            ]
 
-    # Print the ffmpeg concatenation command for debugging
-    # print("Concatenation Command (ffmpeg):")
-    # print(" ".join(ffmpeg_concat_command))
+        # Print the ffmpeg concatenation command for debugging
+        # print("Concatenation Command (ffmpeg):")
+        # print(" ".join(ffmpeg_concat_command))
 
-    print("Concatenating chunks using ffmpeg.\n")
+        print("Concatenating chunks using ffmpeg.\n")
 
-    # Run the ffmpeg concatenation command
-    subprocess.run(ffmpeg_concat_command)
+        # Run the ffmpeg concatenation command
+        subprocess.run(ffmpeg_concat_command)
 
-    print(f"Concatenated video saved as {output_final_ffmpeg}")
+    print(f"Concatenated video saved as {output_final}")
 
 
 parser = argparse.ArgumentParser()
@@ -983,6 +1097,9 @@ parser.add_argument('--restoration', nargs='?', default=0, type=int)
 parser.add_argument('--scm', nargs='?', default=2, type=int)
 parser.add_argument('--qm-min', nargs='?', default=5, type=int)
 parser.add_argument('--qm-max', nargs='?', default=9, type=int)
+parser.add_argument('--variance-boost-strength', nargs='?', default=2, type=int)
+parser.add_argument('--variance-octile', nargs='?', default=6, type=int)
+parser.add_argument('--enable-alt-curve', action='store_true')
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
@@ -1000,6 +1117,8 @@ parser.add_argument('--lookahead', nargs='?', type=int)
 parser.add_argument('--x265cl', nargs='?', type=str)
 parser.add_argument('--sample-start-frame', nargs='?', type=int)
 parser.add_argument('--sample-end-frame', nargs='?', type=int)
+parser.add_argument('--rpu', nargs='?', type=str)
+parser.add_argument('--cudasynth', action='store_true')
 
 # Set the base working folder, use double backslashes
 base_working_folder = "F:\\Temp\\Captures\\encodes"
@@ -1048,9 +1167,14 @@ max_cll = args.max_cll
 lookahead = args.lookahead
 qm_min = args.qm_min
 qm_max = args.qm_max
+vb_strength = args.variance_boost_strength
+octile = args.variance_octile
 x265cl = args.x265cl
 sample_start_frame = args.sample_start_frame
 sample_end_frame = args.sample_end_frame
+rpu = args.rpu
+cudasynth = args.cudasynth
+altcurve = args.enable_alt_curve
 
 # Sanity checks of parameters, no thanks to Python argparse being stupid if the allowed range is big
 if encode_script is None:
@@ -1161,6 +1285,45 @@ elif (qm_min and 0 > qm_min > 15) or (qm_max and 0 > qm_max > 15):
 elif preset not in ('ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow', 'placebo') and encoder == 'x265':
     print("Incorrect preset for x265.\n")
     sys.exit(1)
+elif 0 > vb_strength > 4:
+    print("Variance boost strength must be 0-4.\n")
+    sys.exit(1)
+elif 1 > octile > 8:
+    print("Octile must be 1-8.\n")
+    sys.exit(1)
+
+# Check that needed executables can be found
+if shutil.which("ffmpeg.exe") is None:
+    print("Unable to find ffmpeg.exe from PATH, exiting..\n")
+    sys.exit(1)
+if encoder == 'rav1e':
+    if shutil.which("rav1e.exe") is None:
+        print("Unable to find rav1e.exe from PATH, exiting..\n")
+        sys.exit(1)
+elif encoder == 'aom':
+    if shutil.which("aomenc.exe") is None:
+        print("Unable to find aomenc.exe from PATH, exiting..\n")
+        sys.exit(1)
+elif encoder == 'svt':
+    if shutil.which("svtav1encapp.exe") is None:
+        print("Unable to find svtav1encapp.exe from PATH, exiting..\n")
+        sys.exit(1)
+else:
+    if shutil.which("x265.exe") is None:
+        print("Unable to find x265.exe from PATH, exiting..\n")
+        sys.exit(1)
+if decode_method == 1:
+    if shutil.which("avs2yuv64.exe") is None:
+        print("Unable to find avs2yuv64.exe from PATH, exiting..\n")
+        sys.exit(1)
+if scd_method in (3, 4):
+    if shutil.which("pyscenedetect.exe") is None:
+        print("Unable to find pyscenedetect.exe from PATH, exiting..\n")
+        sys.exit(1)
+if graintable_method == 1:
+    if shutil.which("grav1synth.exe") is None:
+        print("Unable to find grav1synth.exe from PATH, exiting..\n")
+        sys.exit(1)
 
 # Store the full path of encode_script
 encode_script = os.path.abspath(encode_script)
@@ -1216,7 +1379,7 @@ if threads is None:
         threads = 6
 if graintable_sat is None:
     if encoder in ('svt', 'rav1e'):
-        graintable_sat = 1.0
+        graintable_sat = 0.5
     else:
         graintable_sat = 0
 if lookahead is None:
@@ -1231,6 +1394,13 @@ if master_display:
     if max_cll is None:
         max_cll = "0,0"
     master_display, max_cll = parse_master_display(master_display, max_cll)
+if shutil.which("mkvmerge.exe") is not None:
+    use_mkvmerge = True
+else:
+    use_mkvmerge = False
+if rpu and use_mkvmerge is False:
+    print("Dolby Vision mode cannot be used if mkvmerge is not available, exiting..\n")
+    sys.exit(1)
 
 if encoder == 'rav1e':
     default_values = {
@@ -1310,6 +1480,9 @@ elif encoder == 'svt':
         "film-grain-denoise": 0,
         "lp": threads,
         "lookahead": lookahead,
+        "variance-boost-strength": vb_strength,
+        "variance-octile": octile,
+        "enable-alt-curve": altcurve,
     }
     presets = {
         "720p": {
@@ -1611,6 +1784,9 @@ if os.path.exists(output_folder_name):
     print(f"\nCleaning up the existing folder: {output_folder_name}\n")
     clean_folder(output_folder_name)
 
+if rpu:
+    print("Dolby Vision mode detected, please note that it is experimental.\n")
+
 # Create folders for the Avisynth scripts, encoded chunks, and output
 output_folder = os.path.join(output_folder_name, "output")
 scripts_folder = os.path.join(output_folder_name, "scripts")
@@ -1624,9 +1800,11 @@ os.makedirs(chunks_folder, exist_ok=True)
 # Define final video file name
 output_name = os.path.splitext(os.path.basename(encode_script))[0]
 if encoder != 'x265':
-    output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mkv")
+    output_final = os.path.join(output_folder, f"{output_name}.mkv")
+elif encoder == 'x265' and use_mkvmerge:
+    output_final = os.path.join(output_folder, f"{output_name}.mkv")
 else:
-    output_final_ffmpeg = os.path.join(output_folder, f"{output_name}.mp4")
+    output_final = os.path.join(output_folder, f"{output_name}.mp4")
 
 # Grain table creation, only for AV1
 if encoder != 'x265':
@@ -1705,4 +1883,4 @@ with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
 progress_bar.close()
 print("Encoding for all scenes completed.\n")
 
-concatenate(chunks_folder, input_files, output_final_ffmpeg, fr)
+concatenate(chunks_folder, input_files, output_final, fr)
