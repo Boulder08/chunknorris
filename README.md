@@ -6,13 +6,12 @@ A Python script for chunked encoding using an AV1 or x265 CLI encoder
 ---
 
 
-
 ## Overview
 
 **Chunk Norris** is a simple Python script designed for chunked encoding of AV1 or HEVC streams. This script allows you to process large video files more efficiently by dividing them into smaller, manageable chunks for parallel encoding. It also offers the flexibility to set various encoding parameters and presets to suit your specific needs.
 
----
 
+---
 
 
 ## Prerequisites
@@ -26,7 +25,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - ffmpeg
 - PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
-- aomenc (the lavish mod is recommended) / svt-av1 (see below for Discord channel with compatible binaries) / rav1e / x265
+- aomenc (the lavish mod is recommended) / svt-av1-psy (see below for Discord channel with compatible binaries) / rav1e / x265
 - grav1synth (in case of --graintable-method 1)
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
@@ -40,12 +39,12 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
 
 **SVT-AV1 binaries to use with this script**: https://discord.gg/rV6j9fJ4 -> #software
-- if you use svt-av1 to encode, use the latest psy binaries to ensure the highest quality
+- if you use svt-av1 to encode, you must use the latest psy binaries with the variance boost patch (at least v6.0)
 
-**NOTE: x265 tends to be flaky, depending on your Avisynth script. Consider it experimental!**
+**NOTE: x265 tends to be flaky, depending on your Avisynth script. Consider it experimental! Also Dolby Vision mode for HEVC is not supported at the moment, since there are tools to inject the RPU file afterwards to the stream. It's planned for a future version.**
+
 
 ---
-
 
 
 ## Process
@@ -66,20 +65,23 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
    
 7. The encoded chunks are concatenated in their original order to a Matroska (AV1, HEVC with mkvmerge) or MP4 (HEVC with ffmpeg) container.
 
----
 
+---
 
 
 ## Configuration
 
-You can customize **Chunk Norris** by adjusting the following settings in the script:
+You can customize **Chunk Norris** by adjusting the following settings:
 
-- **default_params**: Set common encoding parameters as a list.
-- **base_working_folder**: Define the base working folder where the script will organize its output.
-- **presets**: Add or edit the existing presets for a set of encoder options. The ones you set in the preset override default ones. Please note that the presets x265 uses are the internal ones.
-- Command-line arguments: Modify encoding parameters such as preset, quality (q), minimum chunk length, and more by passing them as arguments when running the script.
+- **default_values**: Set common encoding parameters as a list in the script itself.
+- **presets**: Add or edit the existing presets for a set of encoder options, found in presets.ini.
+- **base_working_folder**: Define the base working folder where the script will organize its output, found in presets.ini under the **paths** section.
+- **command-line arguments**: Modify encoding parameters such as preset, quality (q), minimum chunk length, and more by passing them as arguments when running the script.
+
+The priority of settings is 1) from selected preset in presets.ini, 2) from selected encoder's default settings in presets.ini, 3) default values from script. That is, common keys from the preset will override the default settings etc.
   
   **There are some ready-made film grain tables available in the av1-graintables directory.**
+
 
 ---
 
@@ -92,8 +94,8 @@ To use **Chunk Norris**, run the script from the command line with the following
 python chunk_norris.py encode_script [options]
 ```
 
----
 
+---
 
 
 ## Some ideas for number of parallel encodes
@@ -105,8 +107,8 @@ I've found these numbers generally saturating the CPU near ~100% on aomenc but n
 
 Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 8 myself with no ill effects on aomenc, svt-av1 uses threads much more so very system- and source dependent!
 
----
 
+---
 
 
 ## Options
@@ -115,7 +117,8 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --encoder aom
 - Default: svt
 
-**--preset**: Choose a preset defined in the script. You can add your own and change the existing ones. As mentioned earlier, for x265 this means the internal preset.
+**--preset**: Choose a preset, which you have in **presets.ini**. You can add your own and change the existing ones. Please see the file for naming convention.
+**Note: you can choose multiple presets as a comma separated list. The script will merge the presets based on the order, use the --list-parameters option to verify!**
 - Example: --preset 720p
 - Default: 1080p
 
@@ -143,68 +146,9 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --noiselevel 20
 - Default: 0
 
-**--sharpness**: Defines the '--sharpness' parameter in aomenc and svt-av1-psy. It is a psy RD setting more than a sharpener, lower values allocate more bits to flat areas, blurring sharper ones and vice versa.
-- Example: --sharpness 3
-- Default: 2
-
-**--tile-columns** and **--tile-rows**: Define the corresponding parameters for splitting the encoding (and decoding) into multiple tiles in aomenc. Svt-av1 and rav1e optimize tiles automatically based on the resolution.
-- Example: --tile-columns 1 --tile-rows 1
-- Default: None for both
-
-**--arnr-strength** and **--arnr-maxframes**: Define the parameters for internal alt-ref frame denoising in aomenc.
-- Example: --arnr-strength 3 --arnr-maxframes 9
-- Default: 2 for arnr-strength, 7 for arnr-maxframes
-
-**--tpl-strength**: Defines the multiplier (percentage) for temporal filtering (arnr-strength) in aomenc, 100 being equal to "as is".
-- Example: --tpl-strength 50
-- Default: None (100)
-
-**--max-reference-frames**: Defines the maximum amount of reference frames aomenc may use. For live action content, a lower amount like 4-5 is enough; for animated content, using 7 could be beneficial.
-- Example: --max-reference-frames 4
-- Default: 5
-
-**--tune**: Defines the tuning to use in aomenc. Use 'ssim' or 'omni'.
-- Example: --tune omni
-- Default: ssim
-
-**--tune-content**: Defines the content-based (psy) tuning to use in aomenc. With the lavish mod, 'psy' is recommended.
-- Example: --tune-content default
-- Default: psy
-
 **--luma-bias**, **--luma-bias-strength** and **--luma-bias-midpoint**: Define the parameters for the luma bias modification in aomenc-lavish. See https://www.desmos.com/calculator/nwxoa44sie (lower y means less compression)
 - Example: --luma-bias 10
 - Default: None
-
-**--deltaq-mode**: Defines the deltaq-mode parameter in aomenc. In aomenc-lavish, mode 6 is highly recommended for both SDR and HDR encodes (the effect is close to modes 1+5 with dark bias for SDR and bright bias for HDR). With vanilla aomenc, use 1 for SDR and 5 for HDR.
-
-
-**If you use deltaq-mode 6, make sure you feed 10-bit data into the encoder as the bias table is not yet normalized depending on the source bitdepth.**
-- Example: --deltaq-mode 1
-- Default: None
-
-**--tf**: Defines the enable-tf parameter in svt-av1.
-- Example: --tf 1
-- Default: 0
-
-**--cdef**: Defines the enable-cdef parameter in aomenc and svt-av1.
-- Example: --cdef 1
-- Default: 0
-
-**--restoration**: Defines the enable-restoration parameter in aomenc and svt-av1.
-- Example: --restoration 1
-- Default: 0
-
-**--scm**: Defines the scm parameter in svt-av1.
-- Example: --scm 1
-- Default: 2
-
-**--qm-min**: Defines the qm-min parameter in aomenc and svt-av1.
-- Example: --qm-min 9
-- Default: 5
-
-**--qm-max**: Defines the qm-max parameter in aomenc and svt-av1.
-- Example: --qm-max 15
-- Default: 9
 
 **--variance-boost-strength**: Defines the strength of variance boost for low and medium contrast blocks. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2105 for more details. The default value is good in most cases, try 3 if the material has more contrast variance.
 - Example: --variance-boost-strength 3
@@ -213,9 +157,6 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 **--variance-octile**: Defines the level of low/med contrast detection. Lower values will apply boost in more blocks, but may result in false positives.
 - Example: --variance-octile 2
 - Default: 6
-
-**--enable-alt-curve**: Enables the alternative curve for variance boosting. Possibly better for animation, experimental.
-- Default: not set
 
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
 - --graintable-method 0 skips creation.
@@ -276,19 +217,20 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Example: --credits-cpu 6
 - Default: cpu + 1
 
-**--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
-**NOTE:** If you use DGIndexNV to index the source file, you can copy-paste the data from the end of the .dgi file for these parameters and the script will automatically adjust the values according to what svt-av1 expects.
+**--graintable-cpu**: Defines the '--cpu-used' parameter for the FGS analysis.
+- Example: --graintable-cpu 6
+- Default: 3 for aomenc and svt, 4 for rav1e
 
-For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing.
+**--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
+**NOTE:** If you use DGIndexNV to index the source file, you can copy-paste the data from the end of the .dgi file for these parameters and the script will automatically adjust the values according to what svt-av1 or rav1e expects. For x265, the values are passed as-is.
+
+For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing and svt-av1 or rav1e is the encoder.
 
 **--lookahead**: Defines the amount of lookahead to use in the encoder.
 - Example: --lookahead 50
 - Default: 64 for aomenc, automatic (encoder defined) for svt-av1 and x265, 40 for rav1e
 
-**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use double quotes, and there is no sanity check!
-
-**If you use x265 and want to set the HDR parameters, put them here and not to the separate mastering display parameters!**
-
+**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use double quotes, and there is no sanity check! Take care not to use ones you already have in the presets or default values because x265 will error out.
 - Example: --x265cl "--no-sao --rskip 0"
 - Default: None
 
@@ -300,12 +242,14 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 - Example: --rpu c:\encoding\rpus\movie_rpu.bin
 - Default: None
 
-**--cudasynth**: If you are using Donald Graft's CUDASynth version of DGDecode, you can enable this option for better performance in both hardware decoding and tonemapping HDR to SDR for scene change detection.
+**--cudasynth**: If you are using Donald Graft's CUDASynth version of DGDecode (improves HW decoding of video), you can enable this option for better performance when tonemapping HDR to SDR for scene change detection.
+
+**--list-parameters**: Outputs a list of parameters that the selected encoder would use with your settings.
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
----
 
+---
 
 
 ## Output
@@ -314,12 +258,12 @@ The script will create the following folders in the specified base_working_folde
 
 - **output**: Contains the final concatenated video file or the sample clip.
 - **scripts**: Stores Avisynth scripts for each scene.
-- **chunks**: Stores encoded video chunks.
+- **chunks**: Stores encoded video.
 
 The final concatenated video file will be named based on the input Avisynth script and saved in the output folder.
 
----
 
+---
 
 
 ## Example

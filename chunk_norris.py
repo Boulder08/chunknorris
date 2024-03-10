@@ -19,6 +19,7 @@ import csv
 import ffmpeg
 import math
 import json
+import configparser
 from tqdm import tqdm
 
 
@@ -129,7 +130,11 @@ def create_scxvid_file(scene_change_csv):
     ]
 
     print("Detecting scene changes using SCXviD.\n")
-    subprocess.run(scene_change_command)
+    scd_process = subprocess.Popen(scene_change_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    scd_process.communicate()
+    if scd_process.returncode != 0:
+        print("Error in scene change detection phase, return code:", scd_process.returncode)
+        sys.exit(1)
 
     print("Converting logfile to QP file format.\n")
 
@@ -185,7 +190,11 @@ def ffscd(scd_script):
     # Redirect stderr to the CSV file
     print("Detecting scene changes using ffmpeg.\n")
     with open(scene_change_csv, "w") as stderr_file:
-        subprocess.run(scene_change_command, stderr=stderr_file)
+        scd_process = subprocess.Popen(scene_change_command, stdout=subprocess.PIPE, stderr=stderr_file, shell=True)
+        scd_process.communicate()
+        if scd_process.returncode != 0:
+            print("Error in scene change detection, return code:", scd_process.returncode)
+            sys.exit(1)
 
         # Step 2: Split the Encode into Chunks
         scene_changes = [0]
@@ -240,7 +249,11 @@ def pyscd(scd_script):
         "-q"
     ]
     print("Detecting scene changes using PySceneDetect.\n")
-    subprocess.run(scene_change_command)
+    scd_process = subprocess.Popen(scene_change_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    scd_process.communicate()
+    if scd_process.returncode != 0:
+        print("Error in scene change detection, return code:", scd_process.returncode)
+        sys.exit(1)
 
 
 def create_fgs_table(encode_params):
@@ -289,7 +302,6 @@ def create_fgs_table(encode_params):
         print("Padding left:", padleft)
         print("Padding right:", padright)
         print("Final width:", video_width + padleft + padright)
-        print("\n")
 
         with open(grain_script, 'w') as grain_file:
             grain_file.write(f'Import("{encode_script}")\n')
@@ -310,14 +322,14 @@ def create_fgs_table(encode_params):
 
         # Create the encoding command lines
         if decode_method == 0:
-            avs2yuv_command_grain = [
+            decode_command_grain = [
                 "avs2yuv64.exe",
                 "-no-mt",
                 '"' + grain_script + '"',
                 "-"
             ]
         else:
-            avs2yuv_command_grain = [
+            decode_command_grain = [
                 "ffmpeg.exe",
                 "-loglevel", "fatal",
                 "-i", '"' + grain_script + '"',
@@ -327,34 +339,29 @@ def create_fgs_table(encode_params):
             ]
 
         if encoder == 'rav1e':
-            encode_params_grain = [x.replace(f'--threads {threads}', '--threads 0') for x in encode_params]
+            encode_params_grain = [x.replace(f'--threads {threads}', '--threads 0').replace(f'--speed {cpu}', f'--speed {graintable_cpu}') for x in encode_params]
             enc_command_grain = [
                 "rav1e.exe",
                 *encode_params_grain,
-                f"--speed {cpu}",
-                f"--quantizer {q}",
                 "--no-scene-detection",
                 "-o", '"' + output_grain_file_encoded + '"',
                 "-"
             ]
         elif encoder == 'svt':
-            encode_params_grain = [x.replace(f'--lp {threads}', '--lp 0') for x in encode_params]
+            encode_params_grain = [x.replace(f'--lp {threads}', '--lp 0').replace(f'--preset {cpu}', f'--preset {graintable_cpu}') for x in encode_params]
             enc_command_grain = [
                 "svtav1encapp.exe",
                 *encode_params_grain,
-                f"--preset {cpu}",
-                f"--crf {q}",
                 "-b", '"' + output_grain_file_encoded + '"',
                 "-i -"
             ]
         else:
+            encode_params_grain = [x.replace(f'--cpu-used={cpu}', f'--cpu-used={graintable_cpu}').replace(f'--threads={threads}', f'--threads={os.cpu_count()}') for x in encode_params]
             enc_command_grain = [
                 "aomenc.exe",
                 "--ivf",
-                *encode_params,
+                *encode_params_grain,
                 "--passes=1",
-                f"--cpu-used={cpu}",
-                f"--cq-level={q}",
                 "-o", '"' + output_grain_file_encoded + '"',
                 "-"
             ]
@@ -377,19 +384,30 @@ def create_fgs_table(encode_params):
         ]
 
         # print (avs2yuv_command_grain, enc_command_grain)
-        avs2yuv_command_grain = ' '.join(avs2yuv_command_grain)
+        decode_command_grain = ' '.join(decode_command_grain)
         enc_command_grain = ' '.join(enc_command_grain)
-        print("Encoding the FGS analysis AV1 file.\n")
-        avs2yuv_grain_process = subprocess.Popen(avs2yuv_command_grain, stdout=subprocess.PIPE, shell=True)
-        aomenc_grain_process = subprocess.Popen(enc_command_grain, stdin=avs2yuv_grain_process.stdout, shell=True)
-        aomenc_grain_process.communicate()
+        enc_command_grain = decode_command_grain + ' | ' + enc_command_grain
 
-        print("\n\nEncoding the FGS analysis lossless file.\n")
-        subprocess.run(ffmpeg_command_grain)
+        print("Encoding the FGS analysis AV1 file.")
+        enc_process_grain = subprocess.Popen(enc_command_grain, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        enc_process_grain.communicate()
+        if enc_process_grain.returncode != 0:
+            print("Error in FGS analysis encoder processing, return code:", enc_process_grain.returncode)
+            sys.exit(1)
 
-        print("\nCreating the FGS grain table file.\n")
-        subprocess.run(grav1synth_command)
+        print("Encoding the FGS analysis lossless file.")
+        enc_process_grain_ffmpeg = subprocess.Popen(ffmpeg_command_grain, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        enc_process_grain_ffmpeg.communicate()
+        if enc_process_grain_ffmpeg.returncode != 0:
+            print("Error in FGS analysis lossless file processing, return code:", enc_process_grain_ffmpeg.returncode)
+            sys.exit(1)
 
+        print("Creating the FGS grain table file.\n")
+        enc_process_grain_grav = subprocess.Popen(grav1synth_command, shell=True)
+        enc_process_grain_grav.communicate()
+        if enc_process_grain_grav.returncode != 0:
+            print("Error in grav1synth process, return code:", enc_process_grain_grav.returncode)
+            sys.exit(1)
         sections = extract_sections(output_grain_table_baseline)
 
         if len(sections) == 1:
@@ -404,12 +422,12 @@ def create_fgs_table(encode_params):
                     print(line, end='', file=output_file)  # Print to the output file
             print("\n")
         elif len(sections) >= 2:
-        # Find the second longest section based on timestamp difference
+            # Find the second-longest section based on timestamp difference
 
             # Sort sections by timestamp difference in descending order
             sorted_sections = sorted(sections, key=timestamp_difference, reverse=True)
 
-            # The second longest section is at index 1 (index 0 is the longest)
+            # The second-longest section is at index 1 (index 0 is the longest)
             second_longest_section = sorted_sections[1]
 
             # Replace the header with one from the first section
@@ -426,7 +444,6 @@ def create_fgs_table(encode_params):
                 for line in second_longest_section:
                     print(line, end='')  # Print to the console
                     print(line, end='', file=output_file)  # Print to the output file
-            print("\n")
     else:
         print("The FGS grain table file exists already, skipping creation.\n")
 
@@ -560,7 +577,7 @@ def adjust_chunkdata(chunkdata_list, credits_start_frame):
     return adjusted_chunkdata_list
 
 
-def preprocess_chunks(encode_commands, input_files, chunklist):
+def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_original):
     if scd_method in (0, 1, 2, 5, 6):
         chunk_number = 1
         i = 0
@@ -636,10 +653,11 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
     if credits_start_frame:
         chunklist = adjust_chunkdata(chunklist, credits_start_frame)
 
-    if rpu:
+    if rpu and encoder == 'svt':
         print("Splitting the RPU file based on chunks.\n")
         # Use ThreadPoolExecutor for multithreading
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        dovithreads = int(os.cpu_count()/2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=dovithreads) as executor:
             # Submit each chunk to the executor
             futures = [executor.submit(process_rpu, i) for i in chunklist]
             # Wait for all threads to complete
@@ -658,7 +676,15 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
 
     chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
 
+    if encoder == 'x265' and master_display:
+        if '--hdr10' not in encode_params_original:
+            encode_params_original.append('--hdr10')
+        if '--hdr10-opt' not in encode_params_original:
+            encode_params_original.append('--hdr10-opt')
+        if '--repeat-headers' not in encode_params_original:
+            encode_params_original.append('--repeat-headers')
     for i in chunklist:
+        encode_params = encode_params_original
         scene_script_file = os.path.join(scripts_folder, f"scene_{i['chunk']}.avs")
         if encoder != 'x265':
             output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
@@ -672,15 +698,14 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 scene_script.write('ConvertBits(10)')  # workaround to aomenc bug with 8-bit input and film grain table
 
         if decode_method == 0:
-            avs2yuv_command = [
+            decode_command = [
                 "avs2yuv64.exe",
                 "-no-mt",
                 '"'+scene_script_file+'"',  # Use the Avisynth script for this scene
-                "-",
-                "2> nul"
+                "-"
             ]
         else:
-            avs2yuv_command = [
+            decode_command = [
                 "ffmpeg.exe",
                 "-loglevel", "fatal",
                 "-i", '"'+scene_script_file+'"',
@@ -695,20 +720,16 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "rav1e.exe",
                     *encode_params,
                     "-q",
-                    f"--speed {cpu}",
-                    f"--quantizer {q}",
                     "--no-scene-detection",
                     "-o", '"' + output_chunk + '"',
                     "-"
-                    # "2> nul"
                 ]
             else:
+                encode_params = [x.replace(f'--speed {cpu}', f'--speed {credits_cpu}').replace(f'--quantizer {q}', f'--quantizer {credits_q}') for x in encode_params]
                 enc_command = [
                     "rav1e.exe",
                     *encode_params,
                     "-q",
-                    f"--speed {credits_cpu}",
-                    f"--quantizer {credits_q}",
                     "-o", '"' + output_chunk + '"',
                     "-"
                 ]
@@ -717,21 +738,16 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                 enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
-                    f"--preset {cpu}",
-                    f"--crf {q}",
                     "-b", '"'+output_chunk+'"',
                     "-i -"
-                    # "2> nul"
                 ]
             else:
+                encode_params = [x.replace(f'--preset {cpu}', f'--preset {credits_cpu}').replace(f'--crf {q}', f'--crf {credits_q}') for x in encode_params]
                 enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
-                    f"--preset {credits_cpu}",
-                    f"--crf {credits_q}",
                     "-b", '"'+output_chunk+'"',
                     "-i -"
-                    # "2> nul"
                 ]
             if rpu:
                 rpu_param = "--dolby-vision-rpu " + os.path.join(chunks_folder, f"scene_{i['chunk']}_rpu.bin")
@@ -742,22 +758,19 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "aomenc.exe",
                     "-q",
                     "--ivf",
-                    f"--cpu-used={cpu}",
                     *encode_params,
                     "--passes=1",
-                    f"--cq-level={q}",
                     "-o", '"'+output_chunk+'"',
                     "-"
                 ]
             else:
+                encode_params = [x.replace(f'--cpu-used={cpu}', f'--cpu-used={credits_cpu}').replace(f'--cq-level={q}', f'--cq-level={credits_q}') for x in encode_params]
                 enc_command = [
                     "aomenc.exe",
                     "-q",
                     "--ivf",
-                    f"--cpu-used={credits_cpu}",
                     *encode_params,
                     "--passes=1",
-                    f"--cq-level={credits_q}",
                     "-o", '"' + output_chunk + '"',
                     "-"
                 ]
@@ -767,27 +780,24 @@ def preprocess_chunks(encode_commands, input_files, chunklist):
                     "x265.exe",
                     "--y4m",
                     "--no-progress",
-                    "--log-level", "-1",
                     *encode_params,
                     "--dither",
-                    f"--crf {q}",
                     "--output", '"'+output_chunk+'"',
                     "--input", "-"
                 ]
             else:
+                encode_params = [x.replace(f'--crf {q}', f'--crf {credits_q}') for x in encode_params]
                 enc_command = [
                     "x265.exe",
                     "--y4m",
                     "--no-progress",
-                    "--log-level", "-1",
                     *encode_params,
                     "--dither",
-                    f"--crf {credits_q}",
                     "--output", '"' + output_chunk + '"',
                     "--input", "-"
                 ]
 
-        encode_commands.append((avs2yuv_command, enc_command, output_chunk))
+        encode_commands.append((decode_command, enc_command, output_chunk))
     # print (encode_commands)
     return encode_commands, input_files, chunklist, chunklist_dict
 
@@ -825,7 +835,11 @@ def process_rpu(i):
         "-j", jsonpath,
         "-o", rpupath
     ]
-    subprocess.run(dovitool_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    dovitool_process = subprocess.Popen(dovitool_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    dovitool_process.communicate()
+    if dovitool_process.returncode != 0:
+        print("Error in RPU processing, return code:", dovitool_process.returncode)
+        sys.exit(1)
 
 
 def parse_master_display(master_display, max_cll):
@@ -878,25 +892,76 @@ def run_encode_command(command):
     avs2yuv_command = " ".join(avs2yuv_command)
     enc_command = " ".join(enc_command)
 
+    enc_command = avs2yuv_command + ' | ' + enc_command
+
     # Print the encoding command for debugging
     # print(f"\nEncoder command: {enc_command}")
 
-    # Execute avs2yuv and pipe the output to the encoder
-    avs2yuv_process = subprocess.Popen(avs2yuv_command, stdout=subprocess.PIPE, shell=True)
-    # enc_process = subprocess.Popen(enc_command, stdin=avs2yuv_process.stdout, shell=True)
-    enc_process = subprocess.Popen(enc_command, stdin=avs2yuv_process.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    for attempt in range(1, 3):
+        # Execute the encoder process
+        enc_process = subprocess.Popen(enc_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        enc_process.communicate()
+        if enc_process.returncode == 0:
+            return output_chunk
+        else:
+            print(f"Error in encoder processing, chunk {output_chunk}, attempt {attempt}.\n")
+            print("Return code:", enc_process.returncode)
 
-    # Wait for the encoder to finish
-    enc_process.communicate()
-
-    if enc_process.returncode != 0:
-        print("Error in encoder processing, chunk", output_chunk)
-        print("Return code:", enc_process.returncode)
-
-    return output_chunk
+    print("Max retries reached, unable to encode chunk", output_chunk)
+    print("The encoder command line is:", enc_command)
+    sys.exit(1)
 
 
-def encode_sample(output_folder, encode_script):
+def encode_sample(output_folder, encode_script, encode_params, rpu):
+    if encoder == 'x265' and master_display:
+        if '--hdr10' not in encode_params:
+            encode_params.append('--hdr10')
+        if '--hdr10-opt' not in encode_params:
+            encode_params.append('--hdr10-opt')
+        if '--repeat-headers' not in encode_params:
+            encode_params.append('--repeat-headers')
+
+    if rpu and encoder == 'svt':
+        jsonpath = os.path.join(output_folder, "rpu_sample.json")
+        rpupath = os.path.join(output_folder, "sample_rpu.bin")
+        if sample_start_frame == 0:
+            start = sample_end_frame + 1
+            end = video_length - 1
+            data = {
+                "remove": [f"{start}-{end}"]
+            }
+        elif sample_end_frame != video_length - 1:
+            start = 0
+            end = sample_start_frame - 1
+            start_2 = sample_end_frame + 1
+            end_2 = video_length - 1
+            data = {
+                "remove": [f"{start}-{end}", f"{start_2}-{end_2}"]
+            }
+        else:
+            start = 0
+            end = sample_start_frame - 1
+            data = {
+                "remove": [f"{start}-{end}"]
+            }
+
+        with open(jsonpath, 'w') as json_file:
+            json.dump(data, json_file, indent=2)
+
+        dovitool_command = [
+            "dovi_tool.exe",
+            "editor",
+            "-i", rpu,
+            "-j", jsonpath,
+            "-o", rpupath
+        ]
+        dovitool_process = subprocess.Popen(dovitool_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        dovitool_process.communicate()
+        if dovitool_process.returncode != 0:
+            print("Error in RPU processing, return code:", dovitool_process.returncode)
+            sys.exit(1)
+
+    print(encode_params)
     sample_script_file = os.path.join(output_folder, "sample.avs")
     if encoder != 'x265':
         output_chunk = os.path.join(output_folder, "sample.ivf")
@@ -910,15 +975,14 @@ def encode_sample(output_folder, encode_script):
             sample_script.write('ConvertBits(10)')  # workaround to aomenc bug with 8-bit input and film grain table
 
     if decode_method == 0:
-        avs2yuv_command_sample = [
+        decode_command_sample = [
             "avs2yuv64.exe",
             "-no-mt",
             '"' + sample_script_file + '"',  # Use the Avisynth script for this scene
-            "-",
-            "2> nul"
+            "-"
         ]
     else:
-        avs2yuv_command_sample = [
+        decode_command_sample = [
             "ffmpeg.exe",
             "-loglevel", "fatal",
             "-i", '"' + sample_script_file + '"',
@@ -928,56 +992,59 @@ def encode_sample(output_folder, encode_script):
         ]
 
     if encoder == 'rav1e':
+        encode_params = [x.replace(f'--threads {threads}', '--threads 0') for x in encode_params]
         enc_command_sample = [
             "rav1e.exe",
             *encode_params,
-            f"--speed {cpu}",
-            f"--quantizer {q}",
             "--no-scene-detection",
             "-o", '"' + output_chunk + '"',
             "-"
         ]
     elif encoder == 'svt':
+        encode_params = [x.replace(f'--lp {threads}', '--lp 0') for x in encode_params]
         enc_command_sample = [
             "svtav1encapp.exe",
             *encode_params,
-            f"--preset {cpu}",
-            f"--crf {q}",
             "-b", '"' + output_chunk + '"',
             "-i -"
         ]
     elif encoder == 'aom':
+        encode_params = [x.replace(f'--threads={threads}', f'--threads={os.cpu_count()}') for x in encode_params]
         enc_command_sample = [
             "aomenc.exe",
             "--ivf",
-            f"--cpu-used={cpu}",
             *encode_params,
             "--passes=1",
-            f"--cq-level={q}",
             "-o", '"' + output_chunk + '"',
             "-"
         ]
     else:
+        encode_params = [x.replace(f'--pools {threads}', '--pools *') for x in encode_params]
         enc_command_sample = [
             "x265.exe",
             "--y4m",
             *encode_params,
             "--dither",
-            f"--crf {q}",
             "--output", '"' + output_chunk + '"',
             "--input", "-"
         ]
 
-    avs2yuv_command_sample = ' '.join(avs2yuv_command_sample)
+    decode_command_sample = ' '.join(decode_command_sample)
     enc_command_sample = ' '.join(enc_command_sample)
+    enc_command_sample = decode_command_sample + ' | ' + enc_command_sample
     print("Encoding the sample file.\n")
-    avs2yuv_sample_process = subprocess.Popen(avs2yuv_command_sample, stdout=subprocess.PIPE, shell=True)
-    enc_sample_process = subprocess.Popen(enc_command_sample, stdin=avs2yuv_sample_process.stdout, shell=True)
-    enc_sample_process.communicate()
-    print("Path for the sample is:", output_chunk)
+
+    enc_process_sample = subprocess.Popen(enc_command_sample, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    enc_process_sample.communicate()
+    if enc_process_sample.returncode != 0:
+        print("Error in sample encode processing, return code:", enc_process_sample.returncode)
+        sys.exit(1)
+
+    print("Path to the sample is:", output_chunk)
 
 
 def concatenate(chunks_folder, input_files, output_final, fr):
+    # concat_command = []
     # Create a list file for input files
     input_list_txt = os.path.join(chunks_folder, "input_list.txt")
 
@@ -1016,19 +1083,18 @@ def concatenate(chunks_folder, input_files, output_final, fr):
         with open(mkvmerge_json_file, "w") as json_file:
             json.dump(mkvmerge_json, json_file, indent=2)
 
-        mkvmerge_concat_command = [
+        concat_command = [
             "mkvmerge.exe",
             "-q",
             f"@{mkvmerge_json_file}"
         ]
 
         print("Concatenating chunks using mkvmerge.\n")
-        subprocess.run(mkvmerge_concat_command)
 
     else:
         # Define the ffmpeg concatenation command
         if encoder != 'x265':
-            ffmpeg_concat_command = [
+            concat_command = [
                 "ffmpeg.exe",
                 "-loglevel", "warning",
                 "-f", "concat",
@@ -1041,7 +1107,7 @@ def concatenate(chunks_folder, input_files, output_final, fr):
                 output_final
             ]
         else:
-            ffmpeg_concat_command = [
+            concat_command = [
                 "ffmpeg.exe",
                 "-loglevel", "error",
                 "-f", "concat",
@@ -1062,10 +1128,47 @@ def concatenate(chunks_folder, input_files, output_final, fr):
 
         print("Concatenating chunks using ffmpeg.\n")
 
-        # Run the ffmpeg concatenation command
-        subprocess.run(ffmpeg_concat_command)
+    concat_process = subprocess.Popen(concat_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    concat_process.communicate()
+    if concat_process.returncode != 0:
+        print("Error when concatenating, return code:", concat_process.returncode)
+        sys.exit(1)
 
     print(f"Concatenated video saved as {output_final}")
+
+
+def read_presets(presets):
+    scriptdir = os.path.dirname(os.path.realpath(__file__))
+    presetpath = os.path.join(scriptdir, 'presets.ini')
+    config = configparser.ConfigParser()
+    try:
+        config.read(presetpath)
+    except:
+        print("\nPresets.ini could not be found from the script directory, exiting..\n")
+        sys.exit(1)
+    default_section = encoder + '-default'
+    try:
+        default_params = dict(config.items(default_section))
+    except:
+        print("\nWarning: the default settings for the encoder could not be found from presets.ini.\n")
+        default_params = {}
+    try:
+        base_working_folder = config['paths']['base_working_folder']
+    except:
+        print("The path for base working folder is missing from presets.ini.\n")
+        base_working_folder = input("Please enter a path: ")
+
+    merged_params = {}
+    for preset in presets:
+        preset_section = encoder + '-' + preset
+        try:
+            preset_params = dict(config.items(preset_section))
+            merged_params.update(preset_params)
+        except:
+            print("\nChosen preset not found from the presets.ini file.\n")
+            sys.exit(1)
+
+    return default_params, merged_params, base_working_folder
 
 
 parser = argparse.ArgumentParser()
@@ -1078,32 +1181,15 @@ parser.add_argument('--q', nargs='?', type=int)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
-parser.add_argument('--sharpness', nargs='?', default=2, type=int)
-parser.add_argument('--tile-columns', nargs='?', type=int)
-parser.add_argument('--tile-rows', nargs='?', type=int)
-parser.add_argument('--arnr-strength', default=2, nargs='?', type=int)
-parser.add_argument('--arnr-maxframes', default=7, nargs='?', type=int)
-parser.add_argument('--tpl-strength', nargs='?', type=int)
-parser.add_argument('--max-reference-frames', default=4, nargs='?', type=int)
-parser.add_argument('--tune', nargs='?', type=str)
-parser.add_argument('--tune-content', nargs='?', default='psy', type=str)
 parser.add_argument('--luma-bias', nargs='?', type=int)
 parser.add_argument('--luma-bias-strength', nargs='?', type=int)
 parser.add_argument('--luma-bias-midpoint', nargs='?', type=int)
-parser.add_argument('--deltaq-mode', nargs='?', type=int)
-parser.add_argument('--tf', nargs='?', default=0, type=int)
-parser.add_argument('--cdef', nargs='?', default=0, type=int)
-parser.add_argument('--restoration', nargs='?', default=0, type=int)
-parser.add_argument('--scm', nargs='?', default=2, type=int)
-parser.add_argument('--qm-min', nargs='?', default=5, type=int)
-parser.add_argument('--qm-max', nargs='?', default=9, type=int)
 parser.add_argument('--variance-boost-strength', nargs='?', default=2, type=int)
 parser.add_argument('--variance-octile', nargs='?', default=6, type=int)
-parser.add_argument('--enable-alt-curve', action='store_true')
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--scd-method', nargs='?', default=3, type=int)
+parser.add_argument('--scd-method', nargs='?', default=1, type=int)
 parser.add_argument('--scd-tonemap', nargs='?', type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
 parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
@@ -1111,6 +1197,7 @@ parser.add_argument('--decode-method', nargs='?', default=1, type=int)
 parser.add_argument('--credits-start-frame', nargs='?', type=int)
 parser.add_argument('--credits-q', nargs='?', type=int)
 parser.add_argument('--credits-cpu', nargs='?', type=int)
+parser.add_argument('--graintable-cpu', nargs='?', type=int)
 parser.add_argument('--master-display', nargs='?', type=str)
 parser.add_argument('--max-cll', nargs='?', type=str)
 parser.add_argument('--lookahead', nargs='?', type=int)
@@ -1119,23 +1206,18 @@ parser.add_argument('--sample-start-frame', nargs='?', type=int)
 parser.add_argument('--sample-end-frame', nargs='?', type=int)
 parser.add_argument('--rpu', nargs='?', type=str)
 parser.add_argument('--cudasynth', action='store_true')
-
-# Set the base working folder, use double backslashes
-base_working_folder = "F:\\Temp\\Captures\\encodes"
+parser.add_argument('--list-parameters', action='store_true')
 
 # Command-line arguments
 args = parser.parse_args()
 encode_script = args.encode_script
 encoder = args.encoder
-preset = args.preset
+presets = args.preset.split(',')
 q = args.q
 min_chunk_length = args.min_chunk_length
 max_parallel_encodes = args.max_parallel_encodes
 threads = args.threads
 noiselevel = args.noiselevel
-sharpness = args.sharpness
-tile_columns = args.tile_columns
-tile_rows = args.tile_rows
 graintable = args.graintable
 graintable_method = args.graintable_method
 graintable_sat = args.graintable_sat
@@ -1144,29 +1226,17 @@ scd_tonemap = args.scd_tonemap
 scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
-tune = args.tune
-tune_content = args.tune_content
-arnr_strength = args.arnr_strength
-arnr_maxframes = args.arnr_maxframes
 decode_method = args.decode_method
-max_reference_frames = args.max_reference_frames
 luma_bias = args.luma_bias
 luma_bias_strength = args.luma_bias_strength
 luma_bias_midpoint = args.luma_bias_midpoint
-deltaq_mode = args.deltaq_mode
-tf = args.tf
-cdef = args.cdef
-restoration = args.restoration
-scm = args.scm
-tplstrength = args.tpl_strength
 credits_start_frame = args.credits_start_frame
 credits_q = args.credits_q
 credits_cpu = args.credits_cpu
+graintable_cpu = args.graintable_cpu
 master_display = args.master_display
 max_cll = args.max_cll
 lookahead = args.lookahead
-qm_min = args.qm_min
-qm_max = args.qm_max
 vb_strength = args.variance_boost_strength
 octile = args.variance_octile
 x265cl = args.x265cl
@@ -1174,7 +1244,9 @@ sample_start_frame = args.sample_start_frame
 sample_end_frame = args.sample_end_frame
 rpu = args.rpu
 cudasynth = args.cudasynth
-altcurve = args.enable_alt_curve
+listparams = args.list_parameters
+
+print("\n")
 
 # Sanity checks of parameters, no thanks to Python argparse being stupid if the allowed range is big
 if encode_script is None:
@@ -1201,27 +1273,6 @@ elif 5 > min_chunk_length > 999999:
 elif 1 > max_parallel_encodes > 64:
     print("Maximum parallel encodes is 1-64.\n")
     sys.exit(1)
-elif 0 > sharpness > 7:
-    print("Sharpness must be 0-7.\n")
-    sys.exit(1)
-elif tile_columns and 0 > tile_columns > 4:
-    print("Number of column or row tiles must be 0-4.\n")
-    sys.exit(1)
-elif tile_rows and 0 > tile_rows > 4:
-    print("Number of column or row tiles must be 0-4.\n")
-    sys.exit(1)
-elif 0 > arnr_strength > 6:
-    print("Arnr-strength must be 0-6.\n")
-    sys.exit(1)
-elif 0 > arnr_maxframes > 15:
-    print("Arnr-maxframes must be 0-15.\n")
-    sys.exit(1)
-elif tplstrength and 0 > tplstrength > 100:
-    print("Tpl-strength must be 0-100.\n")
-    sys.exit(1)
-elif 3 > max_reference_frames > 7:
-    print("Maximum reference frames must be 3-7.\n")
-    sys.exit(1)
 elif luma_bias and 0 > luma_bias > 100:
     print("Valid ranges for luma bias, luma bias strength and luma bias midpoint is 0-100, 0-100 and 0-255 respectively.\n")
     sys.exit(1)
@@ -1231,22 +1282,7 @@ elif luma_bias_strength and 0 > luma_bias_strength > 100:
 elif luma_bias_midpoint and 0 > luma_bias_midpoint > 255:
     print("Valid ranges for luma bias, luma bias strength and luma bias midpoint is 0-100, 0-100 and 0-255 respectively.\n")
     sys.exit(1)
-elif deltaq_mode and 0 > deltaq_mode > 6:
-    print("Deltaq-mode must be 0-6.\n")
-    sys.exit(1)
-elif 0 > tf > 1:
-    print("Tf must be 0 or 1.\n")
-    sys.exit(1)
-elif 0 > cdef > 1:
-    print("Cdef must be 0 or 1.\n")
-    sys.exit(1)
-elif 0 > restoration > 1:
-    print("Restoration must be 0 or 1.\n")
-    sys.exit(1)
-elif 0 > scm > 2:
-    print("Scm must be 0-2.\n")
-    sys.exit(1)
-elif 0 > graintable_method > 1:
+elif graintable_method and graintable_method not in (0, 1):
     print("Graintable method must be 0 or 1.\n")
     sys.exit(1)
 elif graintable_sat and 0 > graintable_sat > 1:
@@ -1255,7 +1291,7 @@ elif graintable_sat and 0 > graintable_sat > 1:
 elif 0 > scd_method > 6:
     print("Scene change detection method must be 0-6.\n")
     sys.exit(1)
-elif scd_tonemap and 0 > scd_tonemap > 1:
+elif scd_tonemap and scd_tonemap not in (0, 1):
     print("Scene change detection tonemap must be 0 or 1.\n")
     sys.exit(1)
 elif scdthresh and 1 > scdthresh > 10:
@@ -1264,7 +1300,7 @@ elif scdthresh and 1 > scdthresh > 10:
 elif 0 > downscale_scd > 8:
     print("Scene change detection downscale factor must be 0-8.\n")
     sys.exit(1)
-elif 0 > decode_method > 1:
+elif decode_method and decode_method not in (0, 1):
     print("Decoding method must be 0 or 1.\n")
     sys.exit(1)
 elif credits_q and encoder in ('svt', 'aom') and 2 > credits_q > 64:
@@ -1276,20 +1312,17 @@ elif credits_q and encoder == 'rav1e' and 0 > credits_q > 255:
 elif credits_cpu and -1 > credits_cpu > 11:
     print("CPU for credits must be -1..11.\n")
     sys.exit(1)
+elif graintable and graintable_cpu and -1 > graintable_cpu > 11:
+    print("CPU for FGS analysis must be -1..11.\n")
+    sys.exit(1)
 elif lookahead and 0 > lookahead > 120:
     print("Lookahead must be 0-120.\n")
     sys.exit(1)
-elif (qm_min and 0 > qm_min > 15) or (qm_max and 0 > qm_max > 15):
-    print("Qm-min or qtm-max must be 0-15.\n")
-    sys.exit(1)
-elif preset not in ('ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow', 'placebo') and encoder == 'x265':
-    print("Incorrect preset for x265.\n")
-    sys.exit(1)
-elif 0 > vb_strength > 4:
+elif vb_strength and 0 > vb_strength > 4:
     print("Variance boost strength must be 0-4.\n")
     sys.exit(1)
-elif 1 > octile > 8:
-    print("Octile must be 1-8.\n")
+elif octile and octile not in (1, 2, 4, 6, 8):
+    print("Octile must be 1, 2, 4, 6 or 8.\n")
     sys.exit(1)
 
 # Check that needed executables can be found
@@ -1317,8 +1350,8 @@ if decode_method == 1:
         print("Unable to find avs2yuv64.exe from PATH, exiting..\n")
         sys.exit(1)
 if scd_method in (3, 4):
-    if shutil.which("pyscenedetect.exe") is None:
-        print("Unable to find pyscenedetect.exe from PATH, exiting..\n")
+    if shutil.which("scenedetect.exe") is None:
+        print("Unable to find scenedetect.exe from PATH, exiting..\n")
         sys.exit(1)
 if graintable_method == 1:
     if shutil.which("grav1synth.exe") is None:
@@ -1361,6 +1394,11 @@ if scd_tonemap is None:
         scd_tonemap = 0
 if credits_cpu is None:
     credits_cpu = cpu + 1
+if graintable_cpu is None:
+    if encoder in ('svt', 'aom'):
+        graintable_cpu = 3
+    else:
+        graintable_cpu = 4
 if credits_q is None and encoder == 'rav1e':
     credits_q = 180
 elif credits_q is None and encoder in ('svt', 'aom'):
@@ -1393,7 +1431,9 @@ if lookahead is None:
 if master_display:
     if max_cll is None:
         max_cll = "0,0"
-    master_display, max_cll = parse_master_display(master_display, max_cll)
+    if encoder != 'x265':
+        master_display, max_cll = parse_master_display(master_display, max_cll)
+
 if shutil.which("mkvmerge.exe") is not None:
     use_mkvmerge = True
 else:
@@ -1402,367 +1442,60 @@ if rpu and use_mkvmerge is False:
     print("Dolby Vision mode cannot be used if mkvmerge is not available, exiting..\n")
     sys.exit(1)
 
+# Collect default values from commandline parameters
 if encoder == 'rav1e':
     default_values = {
+        "speed": cpu,
+        "quantizer": q,
         "keyint": video_framerate * 10,
         "photon-noise": noiselevel,
         "threads": threads,
         "rdo-lookahead-frames": lookahead,
-        "min-keyint": 5,
     }
-    presets = {
-        "720p": {
-            "primaries": 'bt709',
-            "transfer": 'bt709',
-            "matrix": 'bt709',
-            "tile-cols": 0,
-            "tile-rows": 0,
-            "threads": 2,
-            # Add more parameters as needed
-        },
-        "1080p": {
-            "primaries": 'bt709',
-            "transfer": 'bt709',
-            "matrix": 'bt709',
-            "tile-cols": 0,
-            "tile-rows": 0,
-            "threads": 2,
-            # Add more parameters as needed
-        },
-        "1080p-hdr": {
-            "primaries": 'bt2020',
-            "transfer": 'smpte2084',
-            "matrix": 'bt2020ncl',
-            "mastering-display": master_display,
-            "content-light": max_cll,
-            "tile-cols": 0,
-            "tile-rows": 0,
-            "threads": 2,
-            # Add more parameters as needed
-        },
-        "1440p-hdr": {
-            "primaries": 'bt2020',
-            "transfer": 'smpte2084',
-            "matrix": 'bt2020ncl',
-            "mastering-display": master_display,
-            "content-light": max_cll,
-            "tile-cols": 1,
-            "tile-rows": 0,
-            "threads": 4,
-            # Add more parameters as needed
-        },
-        "2160p-hdr": {
-            "primaries": 'bt2020',
-            "transfer": 'smpte2084',
-            "matrix": 'bt2020ncl',
-            "mastering-display": master_display,
-            "content-light": max_cll,
-            "tile-cols": 2,
-            "tile-rows": 1,
-            "threads": 6,
-            # Add more parameters as needed
-        },
-        # Add more presets as needed
-    }.get(preset, {})
+    if master_display:
+        default_values['mastering-display'] = '"' + master_display + '"'
+        default_values['content-light'] = max_cll
 elif encoder == 'svt':
     default_values = {
-        "tune": tune,
-        "enable-qm": 1,
-        "qm-min": qm_min,
-        "qm-max": qm_max,
-        "keyint": "10s",
-        "enable-cdef": cdef,
-        "enable-restoration": restoration,
-        "enable-tf": tf,
-        "scm": scm,
-        "sharpness": sharpness,
+        "preset": cpu,
+        "crf": q,
         "film-grain": noiselevel,
-        "film-grain-denoise": 0,
         "lp": threads,
         "lookahead": lookahead,
         "variance-boost-strength": vb_strength,
         "variance-octile": octile,
-        "enable-alt-curve": altcurve,
     }
-    presets = {
-        "720p": {
-            "color-primaries": 1,
-            "transfer-characteristics": 1,
-            "matrix-coefficients": 1,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            # Add more parameters as needed
-        },
-        "1080p": {
-            "color-primaries": 1,
-            "transfer-characteristics": 1,
-            "matrix-coefficients": 1,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            # Add more parameters as needed
-        },
-        "1080p-hdr": {
-            "color-primaries": 9,
-            "transfer-characteristics": 16,
-            "matrix-coefficients": 9,
-            "chroma-sample-position": 2,
-            "mastering-display": master_display,
-            "content-light": max_cll,
-            "enable-hdr": 1,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            # Add more parameters as needed
-        },
-        "1440p-hdr": {
-            "color-primaries": 9,
-            "transfer-characteristics": 16,
-            "matrix-coefficients": 9,
-            "chroma-sample-position": 2,
-            "mastering-display": master_display,
-            "content-light": max_cll,
-            "enable-hdr": 1,
-            "tile-columns": 1,
-            "tile-rows": 0,
-            # Add more parameters as needed
-        },
-        "2160p-hdr": {
-            "color-primaries": 9,
-            "transfer-characteristics": 16,
-            "matrix-coefficients": 9,
-            "chroma-sample-position": 2,
-            "mastering-display": master_display,
-            "content-light": max_cll,
-            "enable-hdr": 1,
-            "tile-columns": 2,
-            "tile-rows": 1,
-            # Add more parameters as needed
-        },
-        # Add more presets as needed
-    }.get(preset, {})
+    if master_display:
+        default_values['mastering-display'] = '"' + master_display + '"'
+        default_values['content-light'] = max_cll
+        default_values['enable-hdr'] = 1
 elif encoder == 'x265':
     default_values = {
-        "preset": preset,
-        "frame-threads": 1,
+        "crf": q,
+        "log-level": -1,
         "pools": threads,
         "keyint": video_framerate * 10,
     }
-    presets = {}
+    if master_display:
+        default_values['master-display'] = '"' + master_display + '"'
+        default_values['max-cll'] = '"' + max_cll + '"'
+        default_values['colorprim'] = 9
+        default_values['transfer'] = 16
+        default_values['colormatrix'] = 9
 else:
     default_values = {
+        "cpu-used": cpu,
+        "cq-level": q,
         "threads": threads,
-        "bit-depth": 10,
-        "end-usage": "q",
-        "aq-mode": 0,
-        "deltaq-mode": 1,
-        "enable-chroma-deltaq": 1,
-        "tune-content": tune_content,
-        "tune": "ssim",
         "lag-in-frames": lookahead,
-        "enable-qm": 1,
-        "qm-min": qm_min,
-        "qm-max": qm_max,
-        "sb-size": "dynamic",
-        "kf-min-dist": 5,
         "kf-max-dist": video_framerate * 10,
-        "disable-trellis-quant": 0,
-        "enable-dnl-denoising": 0,
         "denoise-noise-level": noiselevel,
-        "enable-keyframe-filtering": 1,
-        "tile-columns": tile_columns,
-        "tile-rows": tile_rows,
-        "sharpness": sharpness,
-        "enable-cdef": cdef,
-        "enable-restoration": restoration,
-        "enable-fwd-kf": 0,
-        "arnr-strength": arnr_strength,
-        "arnr-maxframes": arnr_maxframes,
-        "quant-b-adapt": 1,
-        "enable-global-motion": 0,
-        "max-reference-frames": max_reference_frames,
+        "chroma-q-offset-u": -q + 2,
+        "chroma-q-offset-v": -q + 2,
     }
-    # Define presets as dictionaries of encoder parameters
-    presets = {
-        "720p": {
-            "color-primaries": "bt709",
-            "transfer-characteristics": "bt709",
-            "matrix-coefficients": "bt709",
-            "tile-columns": 0,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "max-reference-frames": 5,
-            # Add more parameters as needed
-        },
-        "720p-lavish": {
-            "color-primaries": "bt709",
-            "transfer-characteristics": "bt709",
-            "matrix-coefficients": "bt709",
-            "deltaq-mode": 6,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "ssim-rd-mult": 125,
-            "luma-bias": 24,
-            "luma-bias-midpoint": 25,
-            "luma-bias-strength": 10,
-            "max-reference-frames": 5,
-            "arnr-strength": 0,
-            "arnr-maxframes": 0,
-            "tpl-strength": 0,
-            "chroma-q-offset-u": -q + 2,
-            "chroma-q-offset-v": -q + 2,
-            "enable-experimental-psy": 1,
-            # Add more parameters as needed
-        },
-        "1080p": {
-            "color-primaries": "bt709",
-            "transfer-characteristics": "bt709",
-            "matrix-coefficients": "bt709",
-            "tile-columns": 0,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "max-reference-frames": 4,
-            # Add more parameters as needed
-        },
-        "1080p-lavish": {
-            "color-primaries": "bt709",
-            "transfer-characteristics": "bt709",
-            "matrix-coefficients": "bt709",
-            "deltaq-mode": 6,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "ssim-rd-mult": 125,
-            "luma-bias": 24,
-            "luma-bias-midpoint": 25,
-            "luma-bias-strength": 10,
-            "max-reference-frames": 4,
-            "arnr-strength": 0,
-            "arnr-maxframes": 0,
-            "tpl-strength": 0,
-            "chroma-q-offset-u": -q + 2,
-            "chroma-q-offset-v": -q + 2,
-            "enable-experimental-psy": 1,
-            # Add more parameters as needed
-        },
-        "1080p-hdr": {
-            "color-primaries": "bt2020",
-            "transfer-characteristics": "smpte2084",
-            "matrix-coefficients": "bt2020ncl",
-            "deltaq-mode": 5,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "max-reference-frames": 4,
-            # Add more parameters as needed
-        },
-        "1080p-hdr-lavish": {
-            "color-primaries": "bt2020",
-            "transfer-characteristics": "smpte2084",
-            "matrix-coefficients": "bt2020ncl",
-            "deltaq-mode": 6,
-            "tile-columns": 0,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "ssim-rd-mult": 125,
-            "luma-bias": 24,
-            "luma-bias-midpoint": 25,
-            "luma-bias-strength": 10,
-            "max-reference-frames": 4,
-            "arnr-strength": 0,
-            "arnr-maxframes": 0,
-            "tpl-strength": 0,
-            "chroma-q-offset-u": -q + 2,
-            "chroma-q-offset-v": -q + 2,
-            "enable-experimental-psy": 1,
-            # Add more parameters as needed
-        },
-        "1440p-hdr": {
-            "color-primaries": "bt2020",
-            "transfer-characteristics": "smpte2084",
-            "matrix-coefficients": "bt2020ncl",
-            "deltaq-mode": 5,
-            "tile-columns": 1,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "max-reference-frames": 4,
-            # Add more parameters as needed
-        },
-        "1440p-hdr-lavish": {
-            "color-primaries": "bt2020",
-            "transfer-characteristics": "smpte2084",
-            "matrix-coefficients": "bt2020ncl",
-            "deltaq-mode": 6,
-            "tile-columns": 1,
-            "tile-rows": 0,
-            "max-partition-size": 32,
-            "ssim-rd-mult": 125,
-            "luma-bias": 24,
-            "luma-bias-midpoint": 25,
-            "luma-bias-strength": 10,
-            "max-reference-frames": 4,
-            "arnr-strength": 0,
-            "arnr-maxframes": 0,
-            "tpl-strength": 0,
-            "chroma-q-offset-u": -q + 2,
-            "chroma-q-offset-v": -q + 2,
-            "enable-experimental-psy": 1,
-            # Add more parameters as needed
-        },
-        "2160p-hdr": {
-            "color-primaries": "bt2020",
-            "transfer-characteristics": "smpte2084",
-            "matrix-coefficients": "bt2020ncl",
-            "deltaq-mode": 5,
-            "tile-columns": 2,
-            "tile-rows": 1,
-            "max-partition-size": 32,
-            "max-reference-frames": 4,
-            # Add more parameters as needed
-        },
-        "2160p-hdr-lavish": {
-            "color-primaries": "bt2020",
-            "transfer-characteristics": "smpte2084",
-            "matrix-coefficients": "bt2020ncl",
-            "deltaq-mode": 6,
-            "tile-columns": 2,
-            "tile-rows": 1,
-            "max-partition-size": 32,
-            "ssim-rd-mult": 125,
-            "luma-bias": 24,
-            "luma-bias-midpoint": 25,
-            "luma-bias-strength": 10,
-            "max-reference-frames": 4,
-            "arnr-strength": 0,
-            "arnr-maxframes": 0,
-            "tpl-strength": 0,
-            "chroma-q-offset-u": -q + 2,
-            "chroma-q-offset-v": -q + 2,
-            "enable-experimental-psy": 1,
-            # Add more parameters as needed
-        },
-        # Add more presets as needed
-    }.get(preset, {})
 
-if not presets and encoder != 'x265':
-    print("No matching preset found.\n")
-    sys.exit(1)
-
-# Update or add parameters from the preset if they are not specified in valid_params
-for key, value in presets.items():
-    if key not in default_values or default_values[key] is None:
-        default_values[key] = value
-
-# Merge default parameters and preset parameters into a single dictionary
-encode_params = {**default_values, **presets}
-
-# Iterate through command-line arguments and update the encode_params dictionary
-for key, value in vars(args).items():
-    # Convert underscores to hyphens for comparison
-    param_key = key.replace('_', '-')
-
-    # Check if the parameter exists in encode_params and is not None
-    if param_key in encode_params and value is not None:
-        encode_params[param_key] = value
+default_params, preset_params, base_working_folder = read_presets(presets)
+encode_params = {**default_values, **default_params, **preset_params}
 
 # Create a list of non-empty parameters in the encoder supported format
 if encoder in ('svt', 'rav1e', 'x265'):
@@ -1773,18 +1506,32 @@ else:
 if encoder == 'x265' and x265cl:
     encode_params.append(x265cl)
 
-# print (encode_params)
+if listparams:
+    print("\nYour working folder:", base_working_folder)
+    print("\nThe default values from the Chunk Norris script:\n")
+    for key, value in default_values.items():
+        print(key, value)
+    print("\nThe default values from presets.ini:\n")
+    for key, value in default_params.items():
+        print(key, value)
+    print("\nThe combined values from the selected preset(s):\n")
+    for key, value in preset_params.items():
+        print(key, value)
+    print("\nAll encoding parameters combined:\n")
+    encode_params = " ".join(encode_params)
+    print(encode_params)
+    sys.exit(0)
 
 # Determine the output folder name based on the encode_script
 output_folder_name = os.path.splitext(os.path.basename(encode_script))[0]
 output_folder_name = os.path.join(base_working_folder, output_folder_name)
 
 # Clean up the target folder if it already exists
-if os.path.exists(output_folder_name):
+if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame:
     print(f"\nCleaning up the existing folder: {output_folder_name}\n")
     clean_folder(output_folder_name)
 
-if rpu:
+if rpu and encoder == 'svt':
     print("Dolby Vision mode detected, please note that it is experimental.\n")
 
 # Create folders for the Avisynth scripts, encoded chunks, and output
@@ -1837,7 +1584,7 @@ if encoder != 'x265':
 
 # Encode only the sample if start and end frames are supplied, exit afterwards.
 if sample_start_frame and sample_end_frame:
-    encode_sample(output_folder, encode_script)
+    encode_sample(output_folder, encode_script, encode_params, rpu)
     sys.exit(0)
 
 # Detect scene changes
@@ -1858,7 +1605,7 @@ completed_chunks = []  # List of completed chunks
 processed_length = 0.0
 total_filesize_kbits = 0.0
 avg_bitrate = 0.0
-encode_commands, input_files, chunklist, chunklist_dict = preprocess_chunks(encode_commands, input_files, chunklist)
+encode_commands, input_files, chunklist, chunklist_dict = preprocess_chunks(encode_commands, input_files, chunklist, encode_params)
 progress_bar = tqdm(total=video_length, desc="Progress", unit="frames", smoothing=0)
 
 with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
@@ -1877,7 +1624,7 @@ with concurrent.futures.ThreadPoolExecutor(max_parallel_encodes) as executor:
             # print(f"Encoding for scene completed: {output_chunk}")
     except:
         print("Something went wrong while encoding, exiting!\n")
-        os._exit(1)
+        sys.exit(1)
 
 # Wait for all encoding processes to finish before concatenating
 progress_bar.close()
