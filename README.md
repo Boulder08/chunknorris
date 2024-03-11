@@ -41,8 +41,6 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 **SVT-AV1 binaries to use with this script**: https://discord.gg/rV6j9fJ4 -> #software
 - if you use svt-av1 to encode, you must use the latest psy binaries with the variance boost patch (at least v6.0)
 
-**NOTE: x265 tends to be flaky, depending on your Avisynth script. Consider it experimental! Also Dolby Vision mode for HEVC is not supported at the moment, since there are tools to inject the RPU file afterwards to the stream. It's planned for a future version.**
-
 
 ---
 
@@ -117,7 +115,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --encoder aom
 - Default: svt
 
-**--preset**: Choose a preset, which you have in **presets.ini**. You can add your own and change the existing ones. Please see the file for naming convention.
+**--preset**: Choose a preset, which you have in **presets.ini**. You can add your own and change the existing ones. Please see the file for naming convention and usage.
 **Note: you can choose multiple presets as a comma separated list. The script will merge the presets based on the order, use the --list-parameters option to verify!**
 - Example: --preset 720p
 - Default: 1080p
@@ -230,8 +228,8 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 - Example: --lookahead 50
 - Default: 64 for aomenc, automatic (encoder defined) for svt-av1 and x265, 40 for rav1e
 
-**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use double quotes, and there is no sanity check! Take care not to use ones you already have in the presets or default values because x265 will error out.
-- Example: --x265cl "--no-sao --rskip 0"
+**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! Take care not to use ones you already have in the presets or default values because x265 might error out.
+- Example: --x265cl="--no-sao --rskip 0"
 - Default: None
 
 **--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used so you can validate for example the film grain/photon noise level using this parameter pair.

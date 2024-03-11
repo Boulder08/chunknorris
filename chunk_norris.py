@@ -20,6 +20,7 @@ import ffmpeg
 import math
 import json
 import configparser
+import copy
 from tqdm import tqdm
 
 
@@ -343,7 +344,6 @@ def create_fgs_table(encode_params):
             enc_command_grain = [
                 "rav1e.exe",
                 *encode_params_grain,
-                "--no-scene-detection",
                 "-o", '"' + output_grain_file_encoded + '"',
                 "-"
             ]
@@ -653,11 +653,10 @@ def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_ori
     if credits_start_frame:
         chunklist = adjust_chunkdata(chunklist, credits_start_frame)
 
-    if rpu and encoder == 'svt':
+    if rpu and encoder in ('svt', 'x265'):
         print("Splitting the RPU file based on chunks.\n")
         # Use ThreadPoolExecutor for multithreading
-        dovithreads = int(os.cpu_count()/2)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=dovithreads) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.cpu_count()/2)) as executor:
             # Submit each chunk to the executor
             futures = [executor.submit(process_rpu, i) for i in chunklist]
             # Wait for all threads to complete
@@ -676,15 +675,11 @@ def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_ori
 
     chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
 
-    if encoder == 'x265' and master_display:
-        if '--hdr10' not in encode_params_original:
-            encode_params_original.append('--hdr10')
-        if '--hdr10-opt' not in encode_params_original:
-            encode_params_original.append('--hdr10-opt')
-        if '--repeat-headers' not in encode_params_original:
-            encode_params_original.append('--repeat-headers')
     for i in chunklist:
-        encode_params = encode_params_original
+        encode_params = copy.deepcopy(encode_params_original)
+        if rpu and encoder in ('svt', 'x265'):
+            rpupath = os.path.join(chunks_folder, f"scene_{i['chunk']}_rpu.bin")
+            encode_params.append(f'--dolby-vision-rpu {rpupath}')
         scene_script_file = os.path.join(scripts_folder, f"scene_{i['chunk']}.avs")
         if encoder != 'x265':
             output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.ivf")
@@ -720,7 +715,6 @@ def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_ori
                     "rav1e.exe",
                     *encode_params,
                     "-q",
-                    "--no-scene-detection",
                     "-o", '"' + output_chunk + '"',
                     "-"
                 ]
@@ -749,9 +743,6 @@ def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_ori
                     "-b", '"'+output_chunk+'"',
                     "-i -"
                 ]
-            if rpu:
-                rpu_param = "--dolby-vision-rpu " + os.path.join(chunks_folder, f"scene_{i['chunk']}_rpu.bin")
-                enc_command.append(rpu_param)
         elif encoder == 'aom':
             if i['credits'] == 0:
                 enc_command = [
@@ -781,7 +772,6 @@ def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_ori
                     "--y4m",
                     "--no-progress",
                     *encode_params,
-                    "--dither",
                     "--output", '"'+output_chunk+'"',
                     "--input", "-"
                 ]
@@ -792,7 +782,6 @@ def preprocess_chunks(encode_commands, input_files, chunklist, encode_params_ori
                     "--y4m",
                     "--no-progress",
                     *encode_params,
-                    "--dither",
                     "--output", '"' + output_chunk + '"',
                     "--input", "-"
                 ]
@@ -913,17 +902,10 @@ def run_encode_command(command):
 
 
 def encode_sample(output_folder, encode_script, encode_params, rpu):
-    if encoder == 'x265' and master_display:
-        if '--hdr10' not in encode_params:
-            encode_params.append('--hdr10')
-        if '--hdr10-opt' not in encode_params:
-            encode_params.append('--hdr10-opt')
-        if '--repeat-headers' not in encode_params:
-            encode_params.append('--repeat-headers')
-
-    if rpu and encoder == 'svt':
+    if rpu and encoder in ('svt', 'x265'):
         jsonpath = os.path.join(output_folder, "rpu_sample.json")
         rpupath = os.path.join(output_folder, "sample_rpu.bin")
+        encode_params.append(f'--dolby-vision-rpu {rpupath}')
         if sample_start_frame == 0:
             start = sample_end_frame + 1
             end = video_length - 1
@@ -961,7 +943,6 @@ def encode_sample(output_folder, encode_script, encode_params, rpu):
             print("Error in RPU processing, return code:", dovitool_process.returncode)
             sys.exit(1)
 
-    print(encode_params)
     sample_script_file = os.path.join(output_folder, "sample.avs")
     if encoder != 'x265':
         output_chunk = os.path.join(output_folder, "sample.ivf")
@@ -1032,6 +1013,7 @@ def encode_sample(output_folder, encode_script, encode_params, rpu):
     decode_command_sample = ' '.join(decode_command_sample)
     enc_command_sample = ' '.join(enc_command_sample)
     enc_command_sample = decode_command_sample + ' | ' + enc_command_sample
+
     print("Encoding the sample file.\n")
 
     enc_process_sample = subprocess.Popen(enc_command_sample, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
@@ -1041,6 +1023,8 @@ def encode_sample(output_folder, encode_script, encode_params, rpu):
         sys.exit(1)
 
     print("Path to the sample is:", output_chunk)
+    if rpu and encoder in ('svt', 'x265'):
+        print("Please note that to ensure Dolby Vision mode during playback, it is recommended to mux the file using mkvmerge/MKVToolnix GUI.")
 
 
 def concatenate(chunks_folder, input_files, output_final, fr):
@@ -1245,8 +1229,6 @@ sample_end_frame = args.sample_end_frame
 rpu = args.rpu
 cudasynth = args.cudasynth
 listparams = args.list_parameters
-
-print("\n")
 
 # Sanity checks of parameters, no thanks to Python argparse being stupid if the allowed range is big
 if encode_script is None:
@@ -1469,6 +1451,7 @@ elif encoder == 'svt':
         default_values['mastering-display'] = '"' + master_display + '"'
         default_values['content-light'] = max_cll
         default_values['enable-hdr'] = 1
+        default_values['chroma-sample-position'] = 2
 elif encoder == 'x265':
     default_values = {
         "crf": q,
@@ -1479,9 +1462,14 @@ elif encoder == 'x265':
     if master_display:
         default_values['master-display'] = '"' + master_display + '"'
         default_values['max-cll'] = '"' + max_cll + '"'
+    if video_transfer == 'smpte2084':
         default_values['colorprim'] = 9
         default_values['transfer'] = 16
         default_values['colormatrix'] = 9
+        default_values['chromaloc'] = 2
+        default_values['hdr10'] = ""
+        default_values['hdr10-opt'] = ""
+        default_values['repeat-headers'] = ""
 else:
     default_values = {
         "cpu-used": cpu,
@@ -1506,6 +1494,12 @@ else:
 if encoder == 'x265' and x265cl:
     encode_params.append(x265cl)
 
+if rpu and encoder == 'svt':
+    print("Dolby Vision mode detected, please note that it is experimental.\n")
+elif rpu and encoder == 'x265':
+    print("Dolby Vision mode detected, VBV enabled and Level 5.1 set.\n")
+    encode_params.append('--level-idc 5.1 --no-high-tier --dolby-vision-profile 8.1 --vbv-bufsize 40000 --vbv-maxrate 40000')
+
 if listparams:
     print("\nYour working folder:", base_working_folder)
     print("\nThe default values from the Chunk Norris script:\n")
@@ -1519,6 +1513,7 @@ if listparams:
         print(key, value)
     print("\nAll encoding parameters combined:\n")
     encode_params = " ".join(encode_params)
+    encode_params = encode_params.replace('  ', ' ')
     print(encode_params)
     sys.exit(0)
 
@@ -1528,11 +1523,8 @@ output_folder_name = os.path.join(base_working_folder, output_folder_name)
 
 # Clean up the target folder if it already exists
 if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame:
-    print(f"\nCleaning up the existing folder: {output_folder_name}\n")
+    print(f"Cleaning up the existing folder: {output_folder_name}\n")
     clean_folder(output_folder_name)
-
-if rpu and encoder == 'svt':
-    print("Dolby Vision mode detected, please note that it is experimental.\n")
 
 # Create folders for the Avisynth scripts, encoded chunks, and output
 output_folder = os.path.join(output_folder_name, "output")
