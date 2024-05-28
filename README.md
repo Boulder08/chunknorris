@@ -126,7 +126,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead in aomenc and much better performance in svt-av1.
 - Example: --threads 4
-- Default: 6 for aomenc and rav1e, 4 for svt-av1
+- Default: 6 for aomenc, rav1e and x265, 4 for svt-av1
 
 **--q**: Defines a Q value the encoder will use. In aomenc, the script does a one-pass encode in Q mode, which is the closest to constant quality with a single pass. In svt-av1 and x265, CRF mode is used.
 - Example: --q 16
@@ -172,6 +172,8 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 The lower resolution tables often contain a little more, or sharper grain compared to the higher resolution counterparts.
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
+
+**--create-graintable**: Enables the mode for only creating the film grain table.
 
 **--scd-method**: Defines the method for scene change detection.
 - --scd-method 0 uses a QP file style list (with only keyframes) of scene changes. It attempts to find the file from the path where the encoding script is, searching also in subfolders if needed.
@@ -228,8 +230,8 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 - Example: --lookahead 50
 - Default: 64 for aomenc, automatic (encoder defined) for svt-av1 and x265, 40 for rav1e
 
-**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! Take care not to use ones you already have in the presets or default values because x265 might error out.
-- Example: --x265cl="--no-sao --rskip 0"
+**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
+- Example: --x265cl "--no-sao --rskip 0"
 - Default: None
 
 **--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used so you can validate for example the film grain/photon noise level using this parameter pair.

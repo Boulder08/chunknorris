@@ -21,6 +21,7 @@ import math
 import json
 import configparser
 import copy
+import shlex
 from tqdm import tqdm
 
 
@@ -368,6 +369,7 @@ def create_fgs_table(encode_params):
         ffmpeg_command_grain = [
             "ffmpeg.exe",
             "-i", grain_script,
+            "-y",
             "-loglevel", "fatal",
             "-c:v", "ffv1",
             "-pix_fmt", "yuv420p10le",
@@ -893,7 +895,7 @@ def run_encode_command(command):
         if enc_process.returncode == 0:
             return output_chunk
         else:
-            print(f"Error in encoder processing, chunk {output_chunk}, attempt {attempt}.\n")
+            print(f"\nError in encoder processing, chunk {output_chunk}, attempt {attempt}.\n")
             print("Return code:", enc_process.returncode)
 
     print("Max retries reached, unable to encode chunk", output_chunk)
@@ -1161,7 +1163,7 @@ parser.add_argument('--encoder', nargs='?', default='svt', type=str)
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
 parser.add_argument('--cpu', nargs='?', default=3, type=int)
 parser.add_argument('--threads', nargs='?', type=int)
-parser.add_argument('--q', nargs='?', type=int)
+parser.add_argument('--q', nargs='?', type=float)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
 parser.add_argument('--noiselevel', nargs='?', type=int)
@@ -1173,6 +1175,7 @@ parser.add_argument('--variance-octile', nargs='?', default=6, type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
+parser.add_argument('--create-graintable', action='store_true')
 parser.add_argument('--scd-method', nargs='?', default=1, type=int)
 parser.add_argument('--scd-tonemap', nargs='?', type=int)
 parser.add_argument('--scdthresh', nargs='?', type=float)
@@ -1229,6 +1232,13 @@ sample_end_frame = args.sample_end_frame
 rpu = args.rpu
 cudasynth = args.cudasynth
 listparams = args.list_parameters
+create_graintable = args.create_graintable
+x265cl_dict = {}
+dovicl_dict = {}
+
+if x265cl:
+    print("x265 command line parameter inputted, encoder set to x265.\n")
+    encoder = 'x265'
 
 # Sanity checks of parameters, no thanks to Python argparse being stupid if the allowed range is big
 if encode_script is None:
@@ -1303,8 +1313,8 @@ elif lookahead and 0 > lookahead > 120:
 elif vb_strength and 0 > vb_strength > 4:
     print("Variance boost strength must be 0-4.\n")
     sys.exit(1)
-elif octile and octile not in (1, 2, 4, 6, 8):
-    print("Octile must be 1, 2, 4, 6 or 8.\n")
+elif octile and 0 > octile > 8:
+    print("Octile must be 0-8.\n")
     sys.exit(1)
 
 # Check that needed executables can be found
@@ -1335,7 +1345,7 @@ if scd_method in (3, 4):
     if shutil.which("scenedetect.exe") is None:
         print("Unable to find scenedetect.exe from PATH, exiting..\n")
         sys.exit(1)
-if graintable_method == 1:
+if graintable_method == 1 or create_graintable:
     if shutil.which("grav1synth.exe") is None:
         print("Unable to find grav1synth.exe from PATH, exiting..\n")
         sys.exit(1)
@@ -1357,7 +1367,7 @@ if (sample_start_frame and sample_start_frame >= video_length - 1) or (sample_en
 scene_change_file_path = os.path.dirname(encode_script)
 
 # Set some more case dependent default values
-if noiselevel is None or graintable or graintable_method > 0:
+if noiselevel is None or graintable or graintable_method > 0 or create_graintable:
     if encoder in ('svt', 'aom'):
         noiselevel = 0
     else:
@@ -1378,7 +1388,7 @@ if credits_cpu is None:
     credits_cpu = cpu + 1
 if graintable_cpu is None:
     if encoder in ('svt', 'aom'):
-        graintable_cpu = 3
+        graintable_cpu = 2
     else:
         graintable_cpu = 4
 if credits_q is None and encoder == 'rav1e':
@@ -1399,7 +1409,7 @@ if threads is None:
         threads = 6
 if graintable_sat is None:
     if encoder in ('svt', 'rav1e'):
-        graintable_sat = 0.5
+        graintable_sat = 1
     else:
         graintable_sat = 0
 if lookahead is None:
@@ -1457,6 +1467,7 @@ elif encoder == 'x265':
         "crf": q,
         "log-level": -1,
         "pools": threads,
+        "min-keyint": video_framerate * 10,
         "keyint": video_framerate * 10,
     }
     if master_display:
@@ -1485,20 +1496,55 @@ else:
 default_params, preset_params, base_working_folder = read_presets(presets)
 encode_params = {**default_values, **default_params, **preset_params}
 
+if rpu and encoder == 'svt':
+    print("Dolby Vision mode detected, please note that it is experimental.\n")
+elif rpu and encoder == 'x265':
+    print("Dolby Vision mode detected, VBV enabled and Level 5.1 set.\n")
+    dovicl="--level-idc 5.1 --no-high-tier --dolby-vision-profile 8.1 --vbv-bufsize 40000 --vbv-maxrate 40000"
+    dovicl = shlex.split(dovicl)
+    i = 0
+    while i < len(dovicl):
+        arg = dovicl[i]
+        if arg.startswith('--'):
+            key = arg[2:]
+            if i + 1 < len(dovicl) and not dovicl[i + 1].startswith('--'):
+                value = dovicl[i + 1]
+                dovicl_dict[key] = value
+                i += 2
+            else:
+                dovicl_dict[key] = ''
+                i += 1
+        else:
+            i += 1
+    encode_params.update(dovicl_dict)
+
+
+if x265cl:
+    # A workaround in case x265cl only contains one parameter
+    if not x265cl.endswith(" "):
+        x265cl += " "
+    x265cl = shlex.split(x265cl)
+    i = 0
+    while i < len(x265cl):
+        arg = x265cl[i]
+        if arg.startswith('--'):
+            key = arg[2:]
+            if i + 1 < len(x265cl) and not x265cl[i + 1].startswith('--'):
+                value = x265cl[i + 1]
+                x265cl_dict[key] = value
+                i += 2
+            else:
+                x265cl_dict[key] = ''
+                i += 1
+        else:
+            i += 1
+    encode_params.update(x265cl_dict)
+
 # Create a list of non-empty parameters in the encoder supported format
 if encoder in ('svt', 'rav1e', 'x265'):
     encode_params = [f"--{key} {value}" for key, value in encode_params.items() if value is not None]
 else:
     encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
-
-if encoder == 'x265' and x265cl:
-    encode_params.append(x265cl)
-
-if rpu and encoder == 'svt':
-    print("Dolby Vision mode detected, please note that it is experimental.\n")
-elif rpu and encoder == 'x265':
-    print("Dolby Vision mode detected, VBV enabled and Level 5.1 set.\n")
-    encode_params.append('--level-idc 5.1 --no-high-tier --dolby-vision-profile 8.1 --vbv-bufsize 40000 --vbv-maxrate 40000')
 
 if listparams:
     print("\nYour working folder:", base_working_folder)
@@ -1511,6 +1557,14 @@ if listparams:
     print("\nThe combined values from the selected preset(s):\n")
     for key, value in preset_params.items():
         print(key, value)
+    if x265cl:
+        print("\nParameters from x265cl:\n")
+        for key, value in x265cl_dict.items():
+            print(key, value)
+    if rpu:
+        print("\nParameters from DoVi mode:\n")
+        for key, value in dovicl_dict.items():
+            print(key, value)
     print("\nAll encoding parameters combined:\n")
     encode_params = " ".join(encode_params)
     encode_params = encode_params.replace('  ', ' ')
@@ -1522,7 +1576,7 @@ output_folder_name = os.path.splitext(os.path.basename(encode_script))[0]
 output_folder_name = os.path.join(base_working_folder, output_folder_name)
 
 # Clean up the target folder if it already exists
-if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame:
+if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
     print(f"Cleaning up the existing folder: {output_folder_name}\n")
     clean_folder(output_folder_name)
 
@@ -1553,6 +1607,14 @@ if encoder != 'x265':
     output_grain_table = os.path.split(encode_script)[0]
     output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
     output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
+
+    if create_graintable:
+        try:
+            create_fgs_table(encode_params)
+            print("Graintable created successfully, the path is:", output_grain_table)
+        except:
+            print("Graintable creation failed, please check your script and settings.\n")
+        sys.exit(0)
 
     # Create the reference files for FGS
     if encoder == 'svt':
@@ -1592,6 +1654,11 @@ encode_commands = []  # List to store the encoding commands
 input_files = []  # List to store input files for concatenation
 chunklist = []  # Helper list for producing the encoding and concatenation lists
 completed_chunks = []  # List of completed chunks
+
+encode_params_displist = " ".join(encode_params)
+encode_params_displist = encode_params_displist.replace('  ', ' ')
+print("The encoder parameters:", encode_params_displist)
+print("\n")
 
 # Run encoding commands with a set maximum of concurrent processes
 processed_length = 0.0
