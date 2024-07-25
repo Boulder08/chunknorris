@@ -144,11 +144,11 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --noiselevel 20
 - Default: 0
 
-**--luma-bias**, **--luma-bias-strength** and **--luma-bias-midpoint**: Define the parameters for the luma bias modification in aomenc-lavish. See https://www.desmos.com/calculator/nwxoa44sie (lower y means less compression)
-- Example: --luma-bias 10
+**--luma-bias-strength**: Defines the low luma bias strength in aomenc-lavish and svt-av1-psy.
+- Example: --luma-bias-strength 13
 - Default: None
 
-**--variance-boost-strength**: Defines the strength of variance boost for low and medium contrast blocks. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2105 for more details. The default value is good in most cases, try 3 if the material has more contrast variance.
+**--variance-boost-strength**: Defines the strength of variance boost for low and medium contrast blocks. The default value is good in most cases, try 3 if the material has more contrast variance.
 - Example: --variance-boost-strength 3
 - Default: 2
 
@@ -166,7 +166,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--graintable-sat**: Defines the level of saturation to have in the graintable analysis clip. The recommended range is 0..1 where 0 means black-and-white and 1 does nothing. Uses the Avisynth+ built-in filter "Tweak".
 - Example: --graintable-sat 0.2
-- Default: 0 for aomenc, 0.5 for svt-av1
+- Default: 0 for aomenc, 1.0 for svt-av1
 
 **--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
 The lower resolution tables often contain a little more, or sharper grain compared to the higher resolution counterparts.
@@ -231,6 +231,7 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 - Default: 64 for aomenc, automatic (encoder defined) for svt-av1 and x265, 40 for rav1e
 
 **--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
+** NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --x265cl "--no-cutree ".
 - Example: --x265cl "--no-sao --rskip 0"
 - Default: None
 
@@ -246,6 +247,24 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 **--list-parameters**: Outputs a list of parameters that the selected encoder would use with your settings.
 
+**--qadjust**: Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to get the final quality level more constant.
+The chunk data is output into the 'output' folder for validation. Works on svt-av1 and x265.
+Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
+Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2.
+**EXPERIMENTAL**
+
+**--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a very long time as it uses the complete encoding script.**
+
+**--qadjust-b** and **--qadjust-c**: Define the 'b' and 'c' parameters for Bicubic resizing in case the final encode's resolution differs from the original one.
+- Example: --qadjust-b -1.0 --qadjust-c 0.06
+- Default: --qadjust-b -0.5, --qadjust-c 0.25
+
+**--qadjust-skip**: Defines how many frames the calculation should skip to speed up the process. Setting skip to 1 means all frames will be used.
+- Example: --qadjust-skip 4
+- Default: 1 for resolutions less than HD and 2 for HD and above
+
+**--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1 
+
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
 
@@ -256,9 +275,9 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 The script will create the following folders in the specified base_working_folder:
 
-- **output**: Contains the final concatenated video file or the sample clip.
+- **output**: Contains the final concatenated video file or the sample clip and the log files.
 - **scripts**: Stores Avisynth scripts for each scene.
-- **chunks**: Stores encoded video.
+- **chunks**: Stores encoded video chunks.
 
 The final concatenated video file will be named based on the input Avisynth script and saved in the output folder.
 
