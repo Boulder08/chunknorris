@@ -222,6 +222,7 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Default: 3 for aomenc and svt, 4 for rav1e
 
 **--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
+
 **NOTE:** If you use DGIndexNV to index the source file, you can copy-paste the data from the end of the .dgi file for these parameters and the script will automatically adjust the values according to what svt-av1 or rav1e expects. For x265, the values are passed as-is.
 
 For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing and svt-av1 or rav1e is the encoder.
@@ -231,7 +232,8 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 - Default: 64 for aomenc, automatic (encoder defined) for svt-av1 and x265, 40 for rav1e
 
 **--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
-** NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --x265cl "--no-cutree ".
+
+** NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --x265cl "--no-cutree ". **
 - Example: --x265cl "--no-sao --rskip 0"
 - Default: None
 
@@ -251,6 +253,7 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 The chunk data is output into the 'output' folder for validation. Works on svt-av1 and x265.
 Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
 Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2.
+
 **EXPERIMENTAL**
 
 **--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a very long time as it uses the complete encoding script.**
