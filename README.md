@@ -233,7 +233,7 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 **--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
 
-** NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --x265cl "--no-cutree ". **
+**NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --x265cl "--no-cutree ".**
 - Example: --x265cl "--no-sao --rskip 0"
 - Default: None
 
@@ -249,12 +249,10 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 **--list-parameters**: Outputs a list of parameters that the selected encoder would use with your settings.
 
-**--qadjust**: Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to get the final quality level more constant.
+**--qadjust**: ** EXPERIMENTAL ** Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to get the final quality level more constant.
 The chunk data is output into the 'output' folder for validation. Works on svt-av1 and x265.
 Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
 Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2.
-
-**EXPERIMENTAL**
 
 **--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a very long time as it uses the complete encoding script.**
 
