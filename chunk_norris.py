@@ -746,11 +746,36 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
 
     if qadjust_cycle == 1:
         if encoder == 'svt':
-            encode_params_original = [x.replace(f'--preset {cpu}', f'--preset {qadjust_cpu}').replace(f'--film-grain {noiselevel}', '--film-grain 0') for x in encode_params_original]
+            replacements_list = {'--fast-decode ': '--fast-decode 1',
+                                 '--film-grain ': '--film-grain 0',
+                                 '--preset ': f'--preset {qadjust_cpu}'}
+            encode_params_original = [
+                next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
+                for x in encode_params_original
+            ]
+            if not any('--fast-decode' in param for param in encode_params_original):
+                encode_params_original.append('--fast-decode 1')
         else:
-            encode_params_original.append('--preset fast')
-            encode_params_original.append('--rdoq-level 2')
-            encode_params_original.append('--rc-lookahead 20')
+            replacements_list = {'--preset ': '--preset fast',
+                                 '--limit-refs ': '--limit-refs 3',
+                                 '--rdoq-level ': '--rdoq-level 2',
+                                 '--rc-lookahead ': '--rc-lookahead 40',
+                                 '--lookahead-slices ': '--lookahead-slices 0',
+                                 '--b-adapt ': '--b-adapt 2'}
+            encode_params_original = [
+                next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
+                for x in encode_params_original
+            ]
+            if not any('--preset' in param for param in encode_params_original):
+                encode_params_original.append('--preset fast')
+            if not any('--rdoq-level' in param for param in encode_params_original):
+                encode_params_original.append('--rdoq-level 2')
+            if not any('--rc-lookahead' in param for param in encode_params_original):
+                encode_params_original.append('--rc-lookahead 40')
+            if not any('--lookahead-slices' in param for param in encode_params_original):
+                encode_params_original.append('--lookahead-slices 0')
+            if not any('--b-adapt' in param for param in encode_params_original):
+                encode_params_original.append('--b-adapt 2')
 
         with open(encode_script, 'r') as file:
             source = file.readline()
@@ -829,7 +854,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
                     "-i -"
                 ]
             elif qadjust_cycle != 1:
-                encode_params = [x.replace(f'--preset {cpu}', f'--preset {credits_cpu}').replace(f'--crf {q}', f'--crf {credits_q}').replace(f'--variance-boost-strength {vb_strength}', '--enable-variance-boost 0') for x in encode_params]
+                encode_params = [x.replace(f'--preset {cpu}', f'--preset {credits_cpu}').replace(f'--crf {q}', f'--crf {credits_q}') for x in encode_params]
                 enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
@@ -1353,9 +1378,9 @@ def calculate_ssimu2(chunklist, skip):
     print(f"Calculating the SSIMU2 score using skip value {skip}.\n")
     logging.info(f"Calculating the SSIMU2 score, using skip value {skip}.")
     start_time = datetime.now()
+    pbar_median_sum = 0
 
-    progress_bar = tqdm(total=len(chunklist), desc="Progress", unit="chunks", smoothing=0)
-    ssimu2median = 0
+    progress_bar = tqdm(total=len(chunklist), desc="Progress", unit="chunk", smoothing=0)
 
     for i in range(len(chunklist)):
         if chunklist[i]['credits'] == 1:
@@ -1376,12 +1401,13 @@ def calculate_ssimu2(chunklist, skip):
             total_ssim_scores.append(score)
 
         (average, percentile_5) = calculate_standard_deviation(chunk_ssim_scores)
+        pbar_median_sum += average
+        pbar_median = round(pbar_median_sum / (i + 1), 2)
         percentile_5_total.append(percentile_5)
         if qadjust_verify and qadjust_cycle == 1:
             percentile_5_total_firstpass.append(percentile_5)
-        ssimu2median = round((ssimu2median + average) / (i + 1), 2)
         progress_bar.update(1)
-        progress_bar.set_postfix({'Median score': ssimu2median})
+        progress_bar.set_postfix({'Median score': pbar_median})
 
     progress_bar.close()
     (average, percentile_5) = calculate_standard_deviation(total_ssim_scores)
@@ -1410,14 +1436,14 @@ def calculate_ssimu2(chunklist, skip):
             if new_q > q + br:
                 new_q = q + br
             with open(qadjust_results_file, 'a') as results_file:
-                results_file.write('Chunk number: ' + str(chunklist[i]['chunk']) + ', 5th percentile: ' + str(percentile_5_total[i]) + ', adjusted Q: ' + str(new_q) + '\n')
+                results_file.write('Chunk number: ' + str(chunklist[i]['chunk']) + ', length: ' + str(chunklist[i]['length']) + ' frames' + ', 5th percentile: ' + str(percentile_5_total[i]) + ', adjusted Q: ' + str(new_q) + '\n')
             chunklist[i]['q'] = new_q
         else:
             diff_firstpass = average_firstpass - percentile_5_total_firstpass[i]
             diff_final = average - percentile_5_total[i]
             with open(qadjust_final_results_file, 'a') as results_file:
-                results_file.write('Chunk number: ' + str(chunklist[i]['chunk']) + ', 5th percentile: ' + str(percentile_5_total[i]) + ', 5th percentile (analysis): ' + str(percentile_5_total_firstpass[i]) + ', diff (final): ' + str(diff_final) +
-                                   ', diff (analysis): ' + str(diff_firstpass) + '\n')
+                results_file.write('Chunk number: ' + str(chunklist[i]['chunk']) + ', length: ' + str(chunklist[i]['length']) + ' frames' + ', 5th percentile: ' + str(percentile_5_total[i]) + ', 5th percentile (analysis): '
+                                   + str(percentile_5_total_firstpass[i]) + ', diff (final): ' + str(diff_final) + ', diff (analysis): ' + str(diff_firstpass) + '\n')
 
     end_time = datetime.now()
     ssimu_time = end_time - start_time
@@ -1431,15 +1457,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument('encode_script')
 parser.add_argument('--encoder', nargs='?', default='svt', type=str)
 parser.add_argument('--preset', nargs='?', default='1080p', type=str)
-parser.add_argument('--cpu', nargs='?', default=3, type=int)
+parser.add_argument('--cpu', nargs='?', default=2, type=int)
 parser.add_argument('--threads', nargs='?', type=int)
 parser.add_argument('--q', nargs='?', type=float)
 parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
 parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
-parser.add_argument('--noiselevel', nargs='?', type=int)
-parser.add_argument('--luma-bias-strength', nargs='?', type=int)
-parser.add_argument('--variance-boost-strength', nargs='?', default=2, type=int)
-parser.add_argument('--variance-octile', nargs='?', default=6, type=int)
 parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
 parser.add_argument('--graintable-sat', nargs='?', type=float)
 parser.add_argument('--graintable', nargs='?', type=str)
@@ -1455,8 +1477,7 @@ parser.add_argument('--credits-cpu', nargs='?', type=int)
 parser.add_argument('--graintable-cpu', nargs='?', type=int)
 parser.add_argument('--master-display', nargs='?', type=str)
 parser.add_argument('--max-cll', nargs='?', type=str)
-parser.add_argument('--lookahead', nargs='?', type=int)
-parser.add_argument('--x265cl', nargs='?', type=str)
+parser.add_argument('--extracl', nargs='?', type=str)
 parser.add_argument('--sample-start-frame', nargs='?', type=int)
 parser.add_argument('--sample-end-frame', nargs='?', type=int)
 parser.add_argument('--rpu', nargs='?', type=str)
@@ -1478,7 +1499,6 @@ q = args.q
 min_chunk_length = args.min_chunk_length
 max_parallel_encodes = args.max_parallel_encodes
 threads = args.threads
-noiselevel = args.noiselevel
 graintable = args.graintable
 graintable_method = args.graintable_method
 graintable_sat = args.graintable_sat
@@ -1488,17 +1508,13 @@ scdthresh = args.scdthresh
 downscale_scd = args.downscale_scd
 cpu = args.cpu
 decode_method = args.decode_method
-luma_bias_strength = args.luma_bias_strength
 credits_start_frame = args.credits_start_frame
 credits_q = args.credits_q
 credits_cpu = args.credits_cpu
 graintable_cpu = args.graintable_cpu
 master_display = args.master_display
 max_cll = args.max_cll
-lookahead = args.lookahead
-vb_strength = args.variance_boost_strength
-octile = args.variance_octile
-x265cl = args.x265cl
+extracl = args.extracl
 sample_start_frame = args.sample_start_frame
 sample_end_frame = args.sample_end_frame
 rpu = args.rpu
@@ -1511,14 +1527,10 @@ qadjust_b = args.qadjust_b
 qadjust_c = args.qadjust_c
 qadjust_skip = args.qadjust_skip
 qadjust_cpu = args.qadjust_cpu
-x265cl_dict = {}
+extracl_dict = {}
 dovicl_dict = {}
 
 start_time_total = datetime.now()
-
-if x265cl:
-    print("x265 command line parameter input, encoder set to x265.\n")
-    encoder = 'x265'
 
 # Sanity checks of parameters, thanks to Python argparse being stupid if the allowed range is big
 if encode_script is None:
@@ -1544,9 +1556,6 @@ elif 5 > min_chunk_length > 999999:
     sys.exit(1)
 elif 1 > max_parallel_encodes > 64:
     print("Maximum parallel encodes is 1-64.\n")
-    sys.exit(1)
-elif luma_bias_strength and 0 > luma_bias_strength > 100:
-    print("Valid range for luma bias strength is 0-100.\n")
     sys.exit(1)
 elif graintable_method and graintable_method not in (0, 1):
     print("Graintable method must be 0 or 1.\n")
@@ -1580,15 +1589,6 @@ elif credits_cpu and -1 > credits_cpu > 12:
     sys.exit(1)
 elif graintable and graintable_cpu and -1 > graintable_cpu > 12:
     print("CPU for FGS analysis must be -1..11.\n")
-    sys.exit(1)
-elif lookahead and 0 > lookahead > 120:
-    print("Lookahead must be 0-120.\n")
-    sys.exit(1)
-elif vb_strength and 0 > vb_strength > 4:
-    print("Variance boost strength must be 0-4.\n")
-    sys.exit(1)
-elif octile and 0 > octile > 8:
-    print("Octile must be 0-8.\n")
     sys.exit(1)
 
 # Check that needed executables can be found
@@ -1642,13 +1642,8 @@ if (sample_start_frame and sample_start_frame >= video_length - 1) or (sample_en
 scene_change_file_path = os.path.dirname(encode_script)
 
 # Set some more case dependent default values
-if graintable or (noiselevel and noiselevel > 0):
+if graintable:
     graintable_method = 0
-if noiselevel is None or graintable or graintable_method > 0 or create_graintable:
-    if encoder in ('svt', 'aom'):
-        noiselevel = 0
-    else:
-        noiselevel = None
 if scdthresh is None:
     if scd_method in (1, 2):
         scdthresh = 0.3
@@ -1686,13 +1681,6 @@ if graintable_sat is None:
         graintable_sat = 1
     else:
         graintable_sat = 0
-if lookahead is None:
-    if encoder == 'svt':
-        lookahead = None
-    elif encoder == 'rav1e':
-        lookahead = 40
-    else:
-        lookahead = 64
 # Change the master-display and max-cll parameters to svt-av1 format if needed
 if master_display:
     if max_cll is None:
@@ -1720,9 +1708,7 @@ if encoder == 'rav1e':
         "speed": cpu,
         "quantizer": q,
         "keyint": video_framerate * 10,
-        "photon-noise": noiselevel,
         "threads": threads,
-        "rdo-lookahead-frames": lookahead,
     }
     if master_display:
         default_values['mastering-display'] = '"' + master_display + '"'
@@ -1730,11 +1716,7 @@ if encoder == 'rav1e':
 elif encoder == 'svt':
     default_values = {
         "preset": cpu,
-        "film-grain": noiselevel,
         "lp": threads,
-        "variance-boost-strength": vb_strength,
-        "variance-octile": octile,
-        "frame-luma-bias": luma_bias_strength
     }
     if master_display:
         default_values['mastering-display'] = '"' + master_display + '"'
@@ -1764,9 +1746,7 @@ else:
         "cpu-used": cpu,
         "cq-level": q,
         "threads": threads,
-        "lag-in-frames": lookahead,
         "kf-max-dist": video_framerate * 10,
-        "denoise-noise-level": noiselevel,
         "chroma-q-offset-u": -q + 2,
         "chroma-q-offset-v": -q + 2,
     }
@@ -1797,26 +1777,26 @@ elif rpu and encoder == 'x265':
     encode_params.update(dovicl_dict)
 
 
-if x265cl:
-    # A workaround in case x265cl only contains one parameter
-    if not x265cl.endswith(" "):
-        x265cl += " "
-    x265cl = shlex.split(x265cl)
+if extracl:
+    # A workaround in case extracl only contains one parameter
+    if not extracl.endswith(" "):
+        extracl += " "
+    extracl = shlex.split(extracl)
     i = 0
-    while i < len(x265cl):
-        arg = x265cl[i]
+    while i < len(extracl):
+        arg = extracl[i]
         if arg.startswith('--'):
             key = arg[2:]
-            if i + 1 < len(x265cl) and not x265cl[i + 1].startswith('--'):
-                value = x265cl[i + 1]
-                x265cl_dict[key] = value
+            if i + 1 < len(extracl) and not extracl[i + 1].startswith('--'):
+                value = extracl[i + 1]
+                extracl_dict[key] = value
                 i += 2
             else:
-                x265cl_dict[key] = ''
+                extracl_dict[key] = ''
                 i += 1
         else:
             i += 1
-    encode_params.update(x265cl_dict)
+    encode_params.update(extracl_dict)
 
 # Create a list of non-empty parameters in the encoder supported format
 if encoder in ('svt', 'rav1e', 'x265'):
@@ -1835,9 +1815,9 @@ if listparams:
     print("\nThe combined values from the selected preset(s):\n")
     for key, value in preset_params.items():
         print(key, value)
-    if x265cl:
-        print("\nParameters from x265cl:\n")
-        for key, value in x265cl_dict.items():
+    if extracl:
+        print("\nParameters from extracl:\n")
+        for key, value in extracl_dict.items():
             print(key, value)
     if rpu:
         print("\nParameters from DoVi mode:\n")

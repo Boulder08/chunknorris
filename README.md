@@ -140,22 +140,6 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 - Example: --max-parallel-encodes 8
 - Default: 4
 
-**--noiselevel**: Defines the strength of the internal Film Grain Synthesis. Disabled if a grain table is used.
-- Example: --noiselevel 20
-- Default: 0
-
-**--luma-bias-strength**: Defines the low luma bias strength in aomenc-lavish and svt-av1-psy.
-- Example: --luma-bias-strength 13
-- Default: None
-
-**--variance-boost-strength**: Defines the strength of variance boost for low and medium contrast blocks. The default value is good in most cases, try 3 if the material has more contrast variance.
-- Example: --variance-boost-strength 3
-- Default: 2
-
-**--variance-octile**: Defines the level of low/med contrast detection. Lower values will apply boost in more blocks, but may result in false positives.
-- Example: --variance-octile 2
-- Default: 6
-
 **--graintable-method**: Defines the automatic method for creating a Film Grain Synthesis grain table file using grav1synth. The table is then automatically applied while encoding.
 - --graintable-method 0 skips creation.
 - --graintable-method 1 creates a table based on a user set range.
@@ -227,14 +211,10 @@ The lower resolution tables often contain a little more, or sharper grain compar
 
 For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing and svt-av1 or rav1e is the encoder.
 
-**--lookahead**: Defines the amount of lookahead to use in the encoder.
-- Example: --lookahead 50
-- Default: 64 for aomenc, automatic (encoder defined) for svt-av1 and x265, 40 for rav1e
+**--extracl**: Defines a string of parameters to feed to the encoder in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
 
-**--x265cl**: Defines a string of parameters to feed to x265 in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
-
-**NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --x265cl "--no-cutree ".**
-- Example: --x265cl "--no-sao --rskip 0"
+**NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --extracl "--no-cutree ".**
+- Example: --extracl "--no-sao --rskip 0"
 - Default: None
 
 **--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used so you can validate for example the film grain/photon noise level using this parameter pair.
@@ -249,7 +229,7 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 **--list-parameters**: Outputs a list of parameters that the selected encoder would use with your settings.
 
-**--qadjust**: ** EXPERIMENTAL ** Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to get the final quality level more constant.
+**--qadjust**: ** EXPERIMENTAL ** Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to make the final quality level more constant.
 The chunk data is output into the 'output' folder for validation. Works on svt-av1 and x265.
 Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
 Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2.
