@@ -117,7 +117,7 @@ def timestamp_difference(section):
     return end_timestamp - start_timestamp
 
 
-def create_scxvid_file(scene_change_csv):
+def create_scxvid_file(scene_change_csv, scd_method, scd_tonemap, encode_script, cudasynth, downscale_scd, scd_script, scene_change_file_path):
     if scd_method == 5:
         with open(encode_script, 'r') as file:
             # Read the first line from the original file
@@ -210,7 +210,7 @@ def find_scene_change_file(start_dir, filename):
 
 
 # Function to detect scene changes with ffmpeg
-def ffscd(scd_script):
+def ffscd(scd_script, scdthresh, scene_change_csv):
     # Step 1: Detect Scene Changes
 
     scene_change_command = [
@@ -276,7 +276,7 @@ def ffscd(scd_script):
 
 
 # Function to detect scene changes with PySceneDetect
-def pyscd(scd_script):
+def pyscd(scd_script, output_folder_name, scdthresh, min_chunk_length, scene_change_csv):
     scene_change_command = [
         "scenedetect.exe",
         "-i", scd_script,
@@ -303,7 +303,8 @@ def pyscd(scd_script):
     logging.info(f"Scene change detection done, duration {scd_time}.")
 
 
-def create_fgs_table(encode_params):
+def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
+                     output_grain_table_baseline):
     # Create the grain table only if it doesn't exist already
     if os.path.exists(output_grain_table) is False:
         grain_script = os.path.join(scripts_folder, f"grainscript.avs")
@@ -498,7 +499,7 @@ def create_fgs_table(encode_params):
         print("The FGS grain table file exists already, skipping creation.\n")
 
 
-def scene_change_detection(scd_script):
+def scene_change_detection(scd_script, scd_method, scdthresh, encode_script, scd_tonemap, cudasynth, downscale_scd, scene_change_csv, output_folder_name, min_chunk_length):
     scene_changes = []
     # Detect scene changes or use QP-file
     if scd_method in (0, 5, 6):
@@ -545,14 +546,14 @@ def scene_change_detection(scd_script):
                         scd_file.write('Crop(16,16,-16,-16)')
                     if scd_tonemap != 0 and not cudasynth:
                         scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
-            scene_changes = ffscd(scd_script)
+            scene_changes = ffscd(scd_script, scdthresh, scene_change_csv)
         else:
             print(f"Using scene change analysis script: {scd_script}.\n")
-            scene_changes = ffscd(scd_script)
+            scene_changes = ffscd(scd_script, scdthresh, scene_change_csv)
     elif scd_method == 2:
         print(f"Using scene change analysis script: {encode_script}.\n")
         scd_script = encode_script
-        scene_changes = ffscd(scd_script)
+        scene_changes = ffscd(scd_script, scdthresh, scene_change_csv)
     elif scd_method == 3:
         scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
         scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
@@ -571,18 +572,18 @@ def scene_change_detection(scd_script):
                     scd_file.write('Crop(16,16,-16,-16)')
                     if scd_tonemap != 0 and not cudasynth:
                         scd_file.write('\nConvertBits(16).DGHDRtoSDR(gamma=1/2.4)')
-            pyscd(scd_script)
+            pyscd(scd_script, output_folder_name, scdthresh, min_chunk_length, scene_change_csv)
         else:
             print(f"Using scene change analysis script: {scd_script}.\n")
-            pyscd(scd_script)
+            pyscd(scd_script, output_folder_name, scdthresh, min_chunk_length, scene_change_csv)
     else:
         print(f"Using scene change analysis script: {encode_script}.\n")
-        pyscd(encode_script)
+        pyscd(encode_script, output_folder_name, scdthresh, min_chunk_length, scene_change_csv)
 
     return scene_changes
 
 
-def adjust_chunkdata(chunkdata_list, credits_start_frame, min_chunk_length):
+def adjust_chunkdata(chunkdata_list, credits_start_frame, min_chunk_length, q, credits_q):
     adjusted_chunkdata_list = []
 
     last_frame = chunkdata_list[-1]['end']
@@ -637,7 +638,8 @@ def adjust_chunkdata(chunkdata_list, credits_start_frame, min_chunk_length):
     return adjusted_chunkdata_list
 
 
-def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
+def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scd_method, scene_changes, video_length, scene_change_csv, credits_start_frame, min_chunk_length, q, credits_q,
+                      encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file, video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, cpu, credits_cpu, qadjust_crop, qadjust_crop_values):
     encode_params_original = stored_encode_params.copy()
     enc_command = []
     encode_params = []
@@ -715,7 +717,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
                     chunklist.append(chunkdata)
 
         if credits_start_frame:
-            chunklist = adjust_chunkdata(chunklist, credits_start_frame, min_chunk_length)
+            chunklist = adjust_chunkdata(chunklist, credits_start_frame, min_chunk_length, q, credits_q)
 
     if qadjust_cycle == 2:
         chunklist = sorted(chunklist, key=lambda x: x['chunk'], reverse=False)
@@ -737,7 +739,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
             # Use ThreadPoolExecutor for multithreading
             with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.cpu_count()/2)) as executor:
                 # Submit each chunk to the executor
-                futures = [executor.submit(process_rpu, i, chunklist_length) for i in chunklist]
+                futures = [executor.submit(process_rpu, i, chunklist_length, video_length, scripts_folder, chunks_folder, rpu) for i in chunklist]
                 # Wait for all threads to complete
                 for future in futures:
                     future.result()
@@ -781,6 +783,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
             source = file.readline()
         with open(qadjust_original_file, "w") as qadjust_script:
             qadjust_script.write(source)
+            if qadjust_crop != '0,0,0,0':
+                qadjust_script.write(f'Crop({qadjust_crop_values[0]}, {qadjust_crop_values[1]}, -{abs(qadjust_crop_values[2])}, -{abs(qadjust_crop_values[3])})\n')
             qadjust_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
     for i in chunklist:
         if qadjust_cycle == 1 and i['credits'] == 1:
@@ -805,9 +809,10 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
                     scene_script.write('ConvertBits(10)')
         else:
             with open(scene_script_file, 'w') as scene_script:
-                scene_script.write(source)
+                # scene_script.write(source)
+                scene_script.write(f'Import("qadjust_original.avs")\n')
                 scene_script.write(f"Trim({i['start']}, {i['end']})\n")
-                scene_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
+                # scene_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
                 if encoder != 'x265':
                     scene_script.write('ConvertBits(10)')
         if decode_method == 0:
@@ -913,7 +918,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle):
     return encode_commands, input_files, chunklist, chunklist_dict, encode_params
 
 
-def process_rpu(i, chunklist_length):
+def process_rpu(i, chunklist_length, video_length, scripts_folder, chunks_folder, rpu):
     lastframe = video_length - 1
     # print (chunklist)
     jsonpath = os.path.join(scripts_folder, f"scene_{i['chunk']}_rpu.json")
@@ -1028,7 +1033,7 @@ def run_encode_command(command):
     # sys.exit(1)
 
 
-def encode_sample(output_folder, encode_script, encode_params, rpu):
+def encode_sample(output_folder, encode_script, encode_params, rpu, encoder, sample_start_frame, sample_end_frame, video_length, decode_method, threads, q):
     start_time = datetime.now()
     if rpu and encoder in ('svt', 'x265'):
         jsonpath = os.path.join(output_folder, "rpu_sample.json")
@@ -1163,7 +1168,7 @@ def encode_sample(output_folder, encode_script, encode_params, rpu):
         print("Please note that to ensure Dolby Vision mode during playback, it is recommended to mux the file using mkvmerge/MKVToolnix GUI.")
 
 
-def concatenate(chunks_folder, input_files, output_final, fr):
+def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder):
     # concat_command = []
     # Create a list file for input files
     input_list_txt = os.path.join(chunks_folder, "input_list.txt")
@@ -1261,7 +1266,7 @@ def concatenate(chunks_folder, input_files, output_final, fr):
     print(f"Concatenated video saved as {output_final}.")
 
 
-def read_presets(presets):
+def read_presets(presets, encoder):
     scriptdir = os.path.dirname(os.path.realpath(__file__))
     presetpath = os.path.join(scriptdir, 'presets.ini')
     config = configparser.ConfigParser()
@@ -1306,7 +1311,7 @@ def calculate_standard_deviation(score_list: list[int]):
     return average, sorted_score_list[len(filtered_score_list) // 20]
 
 
-def run_encode():
+def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time):
     completed_chunks = []  # List of completed chunks
     processed_length = 0
     total_filesize_kbits = 0.0
@@ -1350,16 +1355,16 @@ def run_encode():
     end_time = datetime.now()
     encoding_time = end_time - start_time
     if qadjust_cycle != 1:
-        print("Encoding for all scenes completed.\n")
+        print("Finished encoding the chunks.\n")
         logging.info(f"Final encode finished, average bitrate {avg_bitrate} kbps.")
     else:
-        print("Encoding the Q analysis chunks completed.\n")
+        print("Finished encoding the Q analysis chunks.\n")
         logging.info(f"Q analysis encode finished, average bitrate {avg_bitrate} kbps.")
     logging.info(f"Total encoding time {encoding_time}.")
 
 
-def calculate_ssimu2(chunklist, skip):
-    global average_firstpass
+def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, video_matrix, qadjust_verify, percentile_5_total_firstpass, encoder, q, br, qadjust_results_file,
+                     qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass):
     import vapoursynth as vs
     core = vs.core
     if qadjust_cycle == 1:
@@ -1413,16 +1418,21 @@ def calculate_ssimu2(chunklist, skip):
     (average, percentile_5) = calculate_standard_deviation(total_ssim_scores)
     if qadjust_verify and qadjust_cycle == 1:
         average_firstpass = average
+
     print(f'Median score:  {average}\n')
     logging.info(f"SSIMU2 median score: {average}")
 
     if qadjust_cycle == 1:
-        with open(qadjust_results_file, 'w') as results_file:
-            results_file.write('Median score: ' + str(average) + '\n')
+        qadjust_firstpass_data = {
+            "median_score": average,
+            "chunks": []
+        }
     else:
-        with open(qadjust_final_results_file, 'w') as results_file:
-            results_file.write('Median score: ' + str(average) + '\n')
-
+        qadjust_final_data = {
+            "median_score_analysis": average_firstpass,
+            "median_score_final": average,
+            "chunks": []
+        }
     for i in range(len(chunklist)):
         if chunklist[i]['credits'] == 1:
             continue
@@ -1435,555 +1445,620 @@ def calculate_ssimu2(chunklist, skip):
                 new_q = q - br
             if new_q > q + br:
                 new_q = q + br
-            with open(qadjust_results_file, 'a') as results_file:
-                results_file.write('Chunk number: ' + str(chunklist[i]['chunk']) + ', length: ' + str(chunklist[i]['length']) + ' frames' + ', 5th percentile: ' + str(percentile_5_total[i]) + ', adjusted Q: ' + str(new_q) + '\n')
+            qadjust_firstpass_data["chunks"].append({
+                "chunk_number": chunklist[i]['chunk'],
+                "length": chunklist[i]['length'],
+                "percentile_5th": percentile_5_total[i],
+                "adjusted_Q": new_q
+            })
             chunklist[i]['q'] = new_q
         else:
             diff_firstpass = average_firstpass - percentile_5_total_firstpass[i]
             diff_final = average - percentile_5_total[i]
-            with open(qadjust_final_results_file, 'a') as results_file:
-                results_file.write('Chunk number: ' + str(chunklist[i]['chunk']) + ', length: ' + str(chunklist[i]['length']) + ' frames' + ', 5th percentile: ' + str(percentile_5_total[i]) + ', 5th percentile (analysis): '
-                                   + str(percentile_5_total_firstpass[i]) + ', diff (final): ' + str(diff_final) + ', diff (analysis): ' + str(diff_firstpass) + '\n')
+            qadjust_final_data["chunks"].append({
+                "chunk_number": chunklist[i]['chunk'],
+                "length": chunklist[i]['length'],
+                "percentile_5th_analysis": percentile_5_total_firstpass[i],
+                "percentile_5th": percentile_5_total[i],
+                "diff_analysis": diff_firstpass,
+                "diff_final": diff_final
+            })
 
+    if qadjust_cycle == 1:
+        with open(qadjust_results_file, 'w') as results_file:
+            json.dump(qadjust_firstpass_data, results_file, indent=4)
+    else:
+        with open(qadjust_final_results_file, 'w') as results_file:
+            json.dump(qadjust_final_data, results_file, indent=4)
     end_time = datetime.now()
     ssimu_time = end_time - start_time
     logging.info(f"SSIMU2 calculation finished, duration {ssimu_time}.")
     if qadjust_cycle == 1:
         chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
-        return chunklist
+        return chunklist, average_firstpass
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('encode_script')
-parser.add_argument('--encoder', nargs='?', default='svt', type=str)
-parser.add_argument('--preset', nargs='?', default='1080p', type=str)
-parser.add_argument('--cpu', nargs='?', default=2, type=int)
-parser.add_argument('--threads', nargs='?', type=int)
-parser.add_argument('--q', nargs='?', type=float)
-parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
-parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
-parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
-parser.add_argument('--graintable-sat', nargs='?', type=float)
-parser.add_argument('--graintable', nargs='?', type=str)
-parser.add_argument('--create-graintable', action='store_true')
-parser.add_argument('--scd-method', nargs='?', default=1, type=int)
-parser.add_argument('--scd-tonemap', nargs='?', type=int)
-parser.add_argument('--scdthresh', nargs='?', type=float)
-parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
-parser.add_argument('--decode-method', nargs='?', default=1, type=int)
-parser.add_argument('--credits-start-frame', nargs='?', type=int)
-parser.add_argument('--credits-q', nargs='?', type=int)
-parser.add_argument('--credits-cpu', nargs='?', type=int)
-parser.add_argument('--graintable-cpu', nargs='?', type=int)
-parser.add_argument('--master-display', nargs='?', type=str)
-parser.add_argument('--max-cll', nargs='?', type=str)
-parser.add_argument('--extracl', nargs='?', type=str)
-parser.add_argument('--sample-start-frame', nargs='?', type=int)
-parser.add_argument('--sample-end-frame', nargs='?', type=int)
-parser.add_argument('--rpu', nargs='?', type=str)
-parser.add_argument('--cudasynth', action='store_true')
-parser.add_argument('--list-parameters', action='store_true')
-parser.add_argument('--qadjust', action='store_true')
-parser.add_argument('--qadjust-verify', action='store_true')
-parser.add_argument('--qadjust-b', nargs='?', default=-0.5, type=float)
-parser.add_argument('--qadjust-c', nargs='?', default=0.25, type=float)
-parser.add_argument('--qadjust-skip', nargs='?', type=int)
-parser.add_argument('--qadjust-cpu', nargs='?', default=4, type=int)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('encode_script')
+    parser.add_argument('--encoder', nargs='?', default='svt', type=str)
+    parser.add_argument('--preset', nargs='?', default='1080p', type=str)
+    parser.add_argument('--cpu', nargs='?', default=2, type=int)
+    parser.add_argument('--threads', nargs='?', type=int)
+    parser.add_argument('--q', nargs='?', type=float)
+    parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
+    parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
+    parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
+    parser.add_argument('--graintable-sat', nargs='?', type=float)
+    parser.add_argument('--graintable', nargs='?', type=str)
+    parser.add_argument('--create-graintable', action='store_true')
+    parser.add_argument('--scd-method', nargs='?', default=1, type=int)
+    parser.add_argument('--scd-tonemap', nargs='?', type=int)
+    parser.add_argument('--scdthresh', nargs='?', type=float)
+    parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
+    parser.add_argument('--decode-method', nargs='?', default=1, type=int)
+    parser.add_argument('--credits-start-frame', nargs='?', type=int)
+    parser.add_argument('--credits-q', nargs='?', type=int)
+    parser.add_argument('--credits-cpu', nargs='?', type=int)
+    parser.add_argument('--graintable-cpu', nargs='?', type=int)
+    parser.add_argument('--master-display', nargs='?', type=str)
+    parser.add_argument('--max-cll', nargs='?', type=str)
+    parser.add_argument('--extracl', nargs='?', type=str)
+    parser.add_argument('--sample-start-frame', nargs='?', type=int)
+    parser.add_argument('--sample-end-frame', nargs='?', type=int)
+    parser.add_argument('--rpu', nargs='?', type=str)
+    parser.add_argument('--cudasynth', action='store_true')
+    parser.add_argument('--list-parameters', action='store_true')
+    parser.add_argument('--qadjust', action='store_true')
+    parser.add_argument('--qadjust-verify', action='store_true')
+    parser.add_argument('--qadjust-b', nargs='?', default=-0.5, type=float)
+    parser.add_argument('--qadjust-c', nargs='?', default=0.25, type=float)
+    parser.add_argument('--qadjust-skip', nargs='?', type=int)
+    parser.add_argument('--qadjust-cpu', nargs='?', default=4, type=int)
+    parser.add_argument('--qadjust-crop', nargs='?', default='0,0,0,0', type=str)
 
-# Command-line arguments
-args = parser.parse_args()
-encode_script = args.encode_script
-encoder = args.encoder
-presets = args.preset.split(',')
-q = args.q
-min_chunk_length = args.min_chunk_length
-max_parallel_encodes = args.max_parallel_encodes
-threads = args.threads
-graintable = args.graintable
-graintable_method = args.graintable_method
-graintable_sat = args.graintable_sat
-scd_method = args.scd_method
-scd_tonemap = args.scd_tonemap
-scdthresh = args.scdthresh
-downscale_scd = args.downscale_scd
-cpu = args.cpu
-decode_method = args.decode_method
-credits_start_frame = args.credits_start_frame
-credits_q = args.credits_q
-credits_cpu = args.credits_cpu
-graintable_cpu = args.graintable_cpu
-master_display = args.master_display
-max_cll = args.max_cll
-extracl = args.extracl
-sample_start_frame = args.sample_start_frame
-sample_end_frame = args.sample_end_frame
-rpu = args.rpu
-cudasynth = args.cudasynth
-listparams = args.list_parameters
-create_graintable = args.create_graintable
-qadjust = args.qadjust
-qadjust_verify = args.qadjust_verify
-qadjust_b = args.qadjust_b
-qadjust_c = args.qadjust_c
-qadjust_skip = args.qadjust_skip
-qadjust_cpu = args.qadjust_cpu
-extracl_dict = {}
-dovicl_dict = {}
+    # Command-line arguments
+    args = parser.parse_args()
+    encode_script = args.encode_script
+    encoder = args.encoder
+    presets = args.preset.split(',')
+    q = args.q
+    min_chunk_length = args.min_chunk_length
+    max_parallel_encodes = args.max_parallel_encodes
+    threads = args.threads
+    graintable = args.graintable
+    graintable_method = args.graintable_method
+    graintable_sat = args.graintable_sat
+    scd_method = args.scd_method
+    scd_tonemap = args.scd_tonemap
+    scdthresh = args.scdthresh
+    downscale_scd = args.downscale_scd
+    cpu = args.cpu
+    decode_method = args.decode_method
+    credits_start_frame = args.credits_start_frame
+    credits_q = args.credits_q
+    credits_cpu = args.credits_cpu
+    graintable_cpu = args.graintable_cpu
+    master_display = args.master_display
+    max_cll = args.max_cll
+    extracl = args.extracl
+    sample_start_frame = args.sample_start_frame
+    sample_end_frame = args.sample_end_frame
+    rpu = args.rpu
+    cudasynth = args.cudasynth
+    listparams = args.list_parameters
+    create_graintable = args.create_graintable
+    qadjust = args.qadjust
+    qadjust_verify = args.qadjust_verify
+    qadjust_b = args.qadjust_b
+    qadjust_c = args.qadjust_c
+    qadjust_skip = args.qadjust_skip
+    qadjust_cpu = args.qadjust_cpu
+    qadjust_crop = args.qadjust_crop
+    qadjust_crop_values = '0,0,0,0'
+    extracl_dict = {}
+    dovicl_dict = {}
 
-start_time_total = datetime.now()
+    start_time_total = datetime.now()
 
-# Sanity checks of parameters, thanks to Python argparse being stupid if the allowed range is big
-if encode_script is None:
-    print("You need to supply a script to encode.\n")
-    sys.exit(1)
-elif encoder not in ('rav1e', 'svt', 'aom', 'x265'):
-    print("Valid encoder choices are rav1e, svt, aom or x265.\n")
-    sys.exit(1)
-elif encoder in ('svt', 'aom', 'x265') and 2 > q > 64:
-    print("Q must be 2-64.\n")
-    sys.exit(1)
-elif encoder == 'rav1e' and 0 > q > 255:
-    print("Q must be 0-255.\n")
-    sys.exit(1)
-elif -1 > cpu > 12:
-    print("CPU must be -1..12.\n")
-    sys.exit(1)
-elif threads and 1 > threads > 64:
-    print("Threads must be 1-64.\n")
-    sys.exit(1)
-elif 5 > min_chunk_length > 999999:
-    print("Minimum chunk length must be 5-999999.\n")
-    sys.exit(1)
-elif 1 > max_parallel_encodes > 64:
-    print("Maximum parallel encodes is 1-64.\n")
-    sys.exit(1)
-elif graintable_method and graintable_method not in (0, 1):
-    print("Graintable method must be 0 or 1.\n")
-    sys.exit(1)
-elif graintable_sat and 0 > graintable_sat > 1:
-    print("Graintable saturation must be 0-1.0.\n")
-    sys.exit(1)
-elif 0 > scd_method > 6:
-    print("Scene change detection method must be 0-6.\n")
-    sys.exit(1)
-elif scd_tonemap and scd_tonemap not in (0, 1):
-    print("Scene change detection tonemap must be 0 or 1.\n")
-    sys.exit(1)
-elif scdthresh and 1 > scdthresh > 10:
-    print("Scene change detection threshold must be 1-10.0.\n")
-    sys.exit(1)
-elif 0 > downscale_scd > 8:
-    print("Scene change detection downscale factor must be 0-8.\n")
-    sys.exit(1)
-elif decode_method and decode_method not in (0, 1):
-    print("Decoding method must be 0 or 1.\n")
-    sys.exit(1)
-elif credits_q and encoder in ('svt', 'aom') and 2 > credits_q > 64:
-    print("Q for credits must be 2-64.\n")
-    sys.exit(1)
-elif credits_q and encoder == 'rav1e' and 0 > credits_q > 255:
-    print("Q for credits must be 0-255.\n")
-    sys.exit(1)
-elif credits_cpu and -1 > credits_cpu > 12:
-    print("CPU for credits must be -1..11.\n")
-    sys.exit(1)
-elif graintable and graintable_cpu and -1 > graintable_cpu > 12:
-    print("CPU for FGS analysis must be -1..11.\n")
-    sys.exit(1)
-
-# Check that needed executables can be found
-if shutil.which("ffmpeg.exe") is None:
-    print("Unable to find ffmpeg.exe from PATH, exiting..\n")
-    sys.exit(1)
-if encoder == 'rav1e':
-    if shutil.which("rav1e.exe") is None:
-        print("Unable to find rav1e.exe from PATH, exiting..\n")
+    # Sanity checks of parameters, thanks to Python argparse being stupid if the allowed range is big
+    if encode_script is None:
+        print("You need to supply a script to encode.\n")
         sys.exit(1)
-elif encoder == 'aom':
-    if shutil.which("aomenc.exe") is None:
-        print("Unable to find aomenc.exe from PATH, exiting..\n")
+    elif encoder not in ('rav1e', 'svt', 'aom', 'x265'):
+        print("Valid encoder choices are rav1e, svt, aom or x265.\n")
         sys.exit(1)
-elif encoder == 'svt':
-    if shutil.which("svtav1encapp.exe") is None:
-        print("Unable to find svtav1encapp.exe from PATH, exiting..\n")
+    elif encoder in ('svt', 'aom', 'x265') and 2 > q > 64:
+        print("Q must be 2-64.\n")
         sys.exit(1)
-else:
-    if shutil.which("x265.exe") is None:
-        print("Unable to find x265.exe from PATH, exiting..\n")
+    elif encoder == 'rav1e' and 0 > q > 255:
+        print("Q must be 0-255.\n")
         sys.exit(1)
-if decode_method == 1:
-    if shutil.which("avs2yuv64.exe") is None:
-        print("Unable to find avs2yuv64.exe from PATH, exiting..\n")
+    elif -1 > cpu > 12:
+        print("CPU must be -1..12.\n")
         sys.exit(1)
-if scd_method in (3, 4):
-    if shutil.which("scenedetect.exe") is None:
-        print("Unable to find scenedetect.exe from PATH, exiting..\n")
+    elif threads and 1 > threads > 64:
+        print("Threads must be 1-64.\n")
         sys.exit(1)
-if graintable_method == 1 or create_graintable:
-    if shutil.which("grav1synth.exe") is None:
-        print("Unable to find grav1synth.exe from PATH, exiting..\n")
+    elif 5 > min_chunk_length > 999999:
+        print("Minimum chunk length must be 5-999999.\n")
         sys.exit(1)
-
-
-# Store the full path of encode_script
-encode_script = os.path.abspath(encode_script)
-
-# Get video props from the source
-video_width, video_height, video_length, video_transfer, video_matrix, video_framerate, fr = get_video_props(encode_script)
-
-if credits_start_frame and credits_start_frame >= video_length - 1:
-    print("The credits cannot start at or after the end of video.\n")
-    sys.exit(1)
-if (sample_start_frame and sample_start_frame >= video_length - 1) or (sample_end_frame and sample_end_frame >= video_length - 1) or (sample_start_frame and sample_end_frame and sample_start_frame >= sample_end_frame):
-    print("Please check the sample range.\n")
-    sys.exit(1)
-
-# Set scene change helper file to use the same path as the original source script
-scene_change_file_path = os.path.dirname(encode_script)
-
-# Set some more case dependent default values
-if graintable:
-    graintable_method = 0
-if scdthresh is None:
-    if scd_method in (1, 2):
-        scdthresh = 0.3
-    else:
-        scdthresh = 3.0
-if scd_tonemap is None:
-    if video_transfer == 'smpte2084':
-        scd_tonemap = 1
-    else:
-        scd_tonemap = 0
-if credits_cpu is None:
-    credits_cpu = cpu + 1
-    if credits_cpu > 12:
-        credits_cpu = 12
-if graintable_cpu is None:
-    graintable_cpu = cpu
-if credits_q is None and encoder == 'rav1e':
-    credits_q = 180
-elif credits_q is None and encoder in ('svt', 'aom'):
-    credits_q = 32
-elif credits_q is None and encoder == 'x265':
-    credits_q = q + 8
-if q is None:
-    if encoder == 'rav1e':
-        q = 60
-    else:
-        q = 18
-if threads is None:
-    if encoder == 'svt':
-        threads = 4
-    else:
-        threads = 6
-if graintable_sat is None:
-    if encoder in ('svt', 'rav1e'):
-        graintable_sat = 1
-    else:
-        graintable_sat = 0
-# Change the master-display and max-cll parameters to svt-av1 format if needed
-if master_display:
-    if max_cll is None:
-        max_cll = "0,0"
-    if encoder != 'x265':
-        master_display, max_cll = parse_master_display(master_display, max_cll)
-if shutil.which("mkvmerge.exe") is not None:
-    use_mkvmerge = True
-else:
-    use_mkvmerge = False
-if rpu and use_mkvmerge is False:
-    print("Dolby Vision mode cannot be used if mkvmerge is not available, exiting..\n")
-    sys.exit(1)
-if qadjust:
-    qadjust_cycle = 1
-    if encoder not in ('svt', 'x265'):
-        encoder = 'svt'
-        print("\nQadjust enabled and encoder not svt or x265, encoder set to SVT-AV1.")
-else:
-    qadjust_cycle = -1
-
-# Collect default values from commandline parameters
-if encoder == 'rav1e':
-    default_values = {
-        "speed": cpu,
-        "quantizer": q,
-        "keyint": video_framerate * 10,
-        "threads": threads,
-    }
-    if master_display:
-        default_values['mastering-display'] = '"' + master_display + '"'
-        default_values['content-light'] = max_cll
-elif encoder == 'svt':
-    default_values = {
-        "preset": cpu,
-        "lp": threads,
-    }
-    if master_display:
-        default_values['mastering-display'] = '"' + master_display + '"'
-        default_values['content-light'] = max_cll
-        default_values['enable-hdr'] = 1
-        default_values['chroma-sample-position'] = 2
-elif encoder == 'x265':
-    default_values = {
-        "log-level": -1,
-        "pools": threads,
-        "min-keyint": video_framerate * 10,
-        "keyint": video_framerate * 10,
-    }
-    if master_display:
-        default_values['master-display'] = '"' + master_display + '"'
-        default_values['max-cll'] = '"' + max_cll + '"'
-    if video_transfer == 'smpte2084':
-        default_values['colorprim'] = 9
-        default_values['transfer'] = 16
-        default_values['colormatrix'] = 9
-        default_values['chromaloc'] = 2
-        default_values['hdr10'] = ""
-        default_values['hdr10-opt'] = ""
-        default_values['repeat-headers'] = ""
-else:
-    default_values = {
-        "cpu-used": cpu,
-        "cq-level": q,
-        "threads": threads,
-        "kf-max-dist": video_framerate * 10,
-        "chroma-q-offset-u": -q + 2,
-        "chroma-q-offset-v": -q + 2,
-    }
-
-default_params, preset_params, base_working_folder = read_presets(presets)
-encode_params = {**default_values, **default_params, **preset_params}
-
-if rpu and encoder == 'svt':
-    print("Dolby Vision mode detected, please note that it is experimental.\n")
-elif rpu and encoder == 'x265':
-    print("Dolby Vision mode detected, VBV enabled and Level 5.1 set.\n")
-    dovicl = "--level-idc 5.1 --dolby-vision-profile 8.1 --vbv-bufsize 160000 --vbv-maxrate 160000"
-    dovicl = shlex.split(dovicl)
-    i = 0
-    while i < len(dovicl):
-        arg = dovicl[i]
-        if arg.startswith('--'):
-            key = arg[2:]
-            if i + 1 < len(dovicl) and not dovicl[i + 1].startswith('--'):
-                value = dovicl[i + 1]
-                dovicl_dict[key] = value
-                i += 2
-            else:
-                dovicl_dict[key] = ''
-                i += 1
-        else:
-            i += 1
-    encode_params.update(dovicl_dict)
-
-
-if extracl:
-    # A workaround in case extracl only contains one parameter
-    if not extracl.endswith(" "):
-        extracl += " "
-    extracl = shlex.split(extracl)
-    i = 0
-    while i < len(extracl):
-        arg = extracl[i]
-        if arg.startswith('--'):
-            key = arg[2:]
-            if i + 1 < len(extracl) and not extracl[i + 1].startswith('--'):
-                value = extracl[i + 1]
-                extracl_dict[key] = value
-                i += 2
-            else:
-                extracl_dict[key] = ''
-                i += 1
-        else:
-            i += 1
-    encode_params.update(extracl_dict)
-
-# Create a list of non-empty parameters in the encoder supported format
-if encoder in ('svt', 'rav1e', 'x265'):
-    encode_params = [f"--{key} {value}" for key, value in encode_params.items() if value is not None]
-else:
-    encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
-
-if listparams:
-    print("\nYour working folder:", base_working_folder)
-    print("\nThe default values from the Chunk Norris script:\n")
-    for key, value in default_values.items():
-        print(key, value)
-    print("\nThe default values from presets.ini:\n")
-    for key, value in default_params.items():
-        print(key, value)
-    print("\nThe combined values from the selected preset(s):\n")
-    for key, value in preset_params.items():
-        print(key, value)
-    if extracl:
-        print("\nParameters from extracl:\n")
-        for key, value in extracl_dict.items():
-            print(key, value)
-    if rpu:
-        print("\nParameters from DoVi mode:\n")
-        for key, value in dovicl_dict.items():
-            print(key, value)
-    print("\nAll encoding parameters combined:\n")
-    encode_params = " ".join(encode_params)
-    encode_params = encode_params.replace('  ', ' ')
-    print(encode_params)
-    sys.exit(0)
-
-# Determine the output folder name based on the encode_script
-output_folder_name = os.path.splitext(os.path.basename(encode_script))[0]
-output_folder_name = os.path.join(base_working_folder, output_folder_name)
-
-# Clean up the target folder if it already exists
-if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
-    print(f"Cleaning up the existing folder: {output_folder_name}\n")
-    clean_folder(output_folder_name)
-
-# Create folders for the Avisynth scripts, encoded chunks, and output
-output_folder = os.path.join(output_folder_name, "output")
-scripts_folder = os.path.join(output_folder_name, "scripts")
-chunks_folder = os.path.join(output_folder_name, "chunks")
-
-# Create directories if they don't exist
-os.makedirs(output_folder, exist_ok=True)
-os.makedirs(scripts_folder, exist_ok=True)
-os.makedirs(chunks_folder, exist_ok=True)
-
-# Define final video file name
-output_name = os.path.splitext(os.path.basename(encode_script))[0]
-if encoder != 'x265':
-    output_final = os.path.join(output_folder, f"{output_name}.mkv")
-elif encoder == 'x265' and use_mkvmerge:
-    output_final = os.path.join(output_folder, f"{output_name}.mkv")
-else:
-    output_final = os.path.join(output_folder, f"{output_name}.mp4")
-
-encode_log_file = os.path.join(output_folder, f"encode_log.txt")
-logging.basicConfig(filename=encode_log_file, format='%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
-logging.info("Process started.")
-
-# Grain table creation, only for AV1
-if encoder != 'x265':
-    # Generate the FGS analysis file names
-    output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
-    output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.ivf")
-    output_grain_table = os.path.split(encode_script)[0]
-    output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
-    output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
-
-    start_time = datetime.now()
-    if create_graintable:
-        try:
-            create_fgs_table(encode_params)
-            end_time = datetime.now()
-            graintable_time = end_time - start_time
-            logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
-            print("Graintable created successfully, the path is:", output_grain_table)
-        except Exception as e:
-            logging.error(f"Graintable creation failed, please check your script and settings. Exception code {e}")
-            print("Graintable creation failed, please check your script and settings.\n")
+    elif 1 > max_parallel_encodes > 64:
+        print("Maximum parallel encodes is 1-64.\n")
+        sys.exit(1)
+    elif graintable_method and graintable_method not in (0, 1):
+        print("Graintable method must be 0 or 1.\n")
+        sys.exit(1)
+    elif graintable_sat and 0 > graintable_sat > 1:
+        print("Graintable saturation must be 0-1.0.\n")
+        sys.exit(1)
+    elif 0 > scd_method > 6:
+        print("Scene change detection method must be 0-6.\n")
+        sys.exit(1)
+    elif scd_tonemap and scd_tonemap not in (0, 1):
+        print("Scene change detection tonemap must be 0 or 1.\n")
+        sys.exit(1)
+    elif scdthresh and 1 > scdthresh > 10:
+        print("Scene change detection threshold must be 1-10.0.\n")
+        sys.exit(1)
+    elif 0 > downscale_scd > 8:
+        print("Scene change detection downscale factor must be 0-8.\n")
+        sys.exit(1)
+    elif decode_method and decode_method not in (0, 1):
+        print("Decoding method must be 0 or 1.\n")
+        sys.exit(1)
+    elif credits_q and encoder in ('svt', 'aom') and 2 > credits_q > 64:
+        print("Q for credits must be 2-64.\n")
+        sys.exit(1)
+    elif credits_q and encoder == 'rav1e' and 0 > credits_q > 255:
+        print("Q for credits must be 0-255.\n")
+        sys.exit(1)
+    elif credits_cpu and -1 > credits_cpu > 12:
+        print("CPU for credits must be -1..11.\n")
+        sys.exit(1)
+    elif graintable and graintable_cpu and -1 > graintable_cpu > 12:
+        print("CPU for FGS analysis must be -1..11.\n")
+        sys.exit(1)
+    elif qadjust_crop != '0,0,0,0':
+        qadjust_crop_values = [int(x) for x in qadjust_crop.split(',')]
+        if len(qadjust_crop_values) != 4 or not (qadjust_crop_values[0] >= 0 and qadjust_crop_values[1] >= 0):
+            print("Qadjust cropping must have four integers (cropping for left, top, right and bottom of the video).")
+            print("The first two values must be positive or zero, the last two can be zero, positive or negative (consult Avisynth's Crop function for more details).\n")
             sys.exit(1)
-        sys.exit(0)
-    # Create the reference files for FGS
-    if encoder == 'svt':
-        if graintable_method > 0:
-            create_fgs_table(encode_params)
-            end_time = datetime.now()
-            graintable_time = end_time - start_time
-            logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
-            if qadjust_cycle != 1:
-                encode_params.append(f"--fgs-table \"{output_grain_table}\"")
-        elif graintable:
-            if qadjust_cycle != 1:
-                encode_params.append(f"--fgs-table \"{graintable}\"")
-    elif encoder == 'rav1e':
-        if graintable_method > 0:
-            create_fgs_table(encode_params)
-            end_time = datetime.now()
-            graintable_time = end_time - start_time
-            logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
-            encode_params.append(f"--film-grain-table \"{output_grain_table}\"")
-        elif graintable:
-            encode_params.append(f"--film-grain-table \"{graintable}\"")
+
+    # Check that needed executables can be found
+    if shutil.which("ffmpeg.exe") is None:
+        print("Unable to find ffmpeg.exe from PATH, exiting..\n")
+        sys.exit(1)
+    if encoder == 'rav1e':
+        if shutil.which("rav1e.exe") is None:
+            print("Unable to find rav1e.exe from PATH, exiting..\n")
+            sys.exit(1)
+    elif encoder == 'aom':
+        if shutil.which("aomenc.exe") is None:
+            print("Unable to find aomenc.exe from PATH, exiting..\n")
+            sys.exit(1)
+    elif encoder == 'svt':
+        if shutil.which("svtav1encapp.exe") is None:
+            print("Unable to find svtav1encapp.exe from PATH, exiting..\n")
+            sys.exit(1)
     else:
-        if graintable_method > 0:
-            create_fgs_table(encode_params)
-            end_time = datetime.now()
-            graintable_time = end_time - start_time
-            logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
-            encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
-        elif graintable:
-            encode_params.append(f"--film-grain-table=\"{graintable}\"")
+        if shutil.which("x265.exe") is None:
+            print("Unable to find x265.exe from PATH, exiting..\n")
+            sys.exit(1)
+    if decode_method == 1:
+        if shutil.which("avs2yuv64.exe") is None:
+            print("Unable to find avs2yuv64.exe from PATH, exiting..\n")
+            sys.exit(1)
+    if scd_method in (3, 4):
+        if shutil.which("scenedetect.exe") is None:
+            print("Unable to find scenedetect.exe from PATH, exiting..\n")
+            sys.exit(1)
+    if graintable_method == 1 or create_graintable:
+        if shutil.which("grav1synth.exe") is None:
+            print("Unable to find grav1synth.exe from PATH, exiting..\n")
+            sys.exit(1)
 
-# Encode only the sample if start and end frames are supplied, exit afterwards.
-if sample_start_frame is not None and sample_end_frame is not None:
-    encode_sample(output_folder, encode_script, encode_params, rpu)
-    sys.exit(0)
+    # Store the full path of encode_script
+    encode_script = os.path.abspath(encode_script)
 
-# Detect scene changes
-scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
-scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
-scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
-if scd_method in (5, 6):
-    create_scxvid_file(scene_change_csv)
-scene_changes = scene_change_detection(scd_script)
-logging.info("Finished processing the scene change data.")
+    # Get video props from the source
+    video_width, video_height, video_length, video_transfer, video_matrix, video_framerate, fr = get_video_props(encode_script)
 
-# Create the AVS scripts, prepare encoding and concatenation commands for chunks
-encode_commands = []  # List to store the encoding commands
-input_files = []  # List to store input files for concatenation
-chunklist = []  # Helper list for producing the encoding and concatenation lists
-qadjust_original_file = os.path.join(scripts_folder, f"qadjust_original.avs")
+    if credits_start_frame and credits_start_frame >= video_length - 1:
+        print("The credits cannot start at or after the end of video.\n")
+        sys.exit(1)
+    if (sample_start_frame and sample_start_frame >= video_length - 1) or (sample_end_frame and sample_end_frame >= video_length - 1) or (sample_start_frame and sample_end_frame and sample_start_frame >= sample_end_frame):
+        print("Please check the sample range.\n")
+        sys.exit(1)
 
-# Run encoding commands with a set maximum of concurrent processes
-stored_encode_params = encode_params.copy()
-encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle)
-encode_params_displist = " ".join(encode_params)
-encode_params_displist = encode_params_displist.replace('  ', ' ')
-# print (chunklist)
-if qadjust_cycle == -1:
-    logging.info("Set up chunklist and corresponding encode commands for the final encode.")
-    print("The encoder parameters for the final encode:", encode_params_displist)
-    print("\n")
-else:
-    logging.info("Set up chunklist and corresponding encode commands for the Q adjust phase.")
-    print("The encoder parameters for the analysis:", encode_params_displist)
-    print("\n")
-start_time = datetime.now()
-run_encode()
-if qadjust is False:
-    concatenate(chunks_folder, input_files, output_final, fr)
-else:
-    output_final_ssimu2 = os.path.join(output_folder, f"{output_name}_ssimu2.mkv")
-    concatenate(chunks_folder, input_files, output_final_ssimu2, fr)
+    # Set scene change helper file to use the same path as the original source script
+    scene_change_file_path = os.path.dirname(encode_script)
+
+    # Set some more case dependent default values
+    if graintable:
+        graintable_method = 0
+    if scdthresh is None:
+        if scd_method in (1, 2):
+            scdthresh = 0.3
+        else:
+            scdthresh = 3.0
+    if scd_tonemap is None:
+        if video_transfer == 'smpte2084':
+            scd_tonemap = 1
+        else:
+            scd_tonemap = 0
+    if credits_cpu is None:
+        credits_cpu = cpu + 1
+        if credits_cpu > 12:
+            credits_cpu = 12
+    if graintable_cpu is None:
+        graintable_cpu = cpu
+    if credits_q is None and encoder == 'rav1e':
+        credits_q = 180
+    elif credits_q is None and encoder in ('svt', 'aom'):
+        credits_q = 32
+    elif credits_q is None and encoder == 'x265':
+        credits_q = q + 8
+    if q is None:
+        if encoder == 'rav1e':
+            q = 60
+        else:
+            q = 18
+    if threads is None:
+        if encoder == 'svt':
+            threads = 4
+        else:
+            threads = 6
+    if graintable_sat is None:
+        if encoder in ('svt', 'rav1e'):
+            graintable_sat = 1
+        else:
+            graintable_sat = 0
+    # Change the master-display and max-cll parameters to svt-av1 format if needed
+    if master_display:
+        if max_cll is None:
+            max_cll = "0,0"
+        if encoder != 'x265':
+            master_display, max_cll = parse_master_display(master_display, max_cll)
+    if shutil.which("mkvmerge.exe") is not None:
+        use_mkvmerge = True
+    else:
+        use_mkvmerge = False
+    if rpu and use_mkvmerge is False:
+        print("Dolby Vision mode cannot be used if mkvmerge is not available, exiting..\n")
+        sys.exit(1)
+    if qadjust:
+        qadjust_cycle = 1
+        if encoder not in ('svt', 'x265'):
+            encoder = 'svt'
+            print("\nQadjust enabled and encoder not svt or x265, encoder set to SVT-AV1.")
+    else:
+        qadjust_cycle = -1
     if encoder == 'svt':
         br = 10
     else:
         br = 2
-    qadjust_results_file = os.path.join(output_folder, f"{output_name}_qadjust.txt")
-    qadjust_final_results_file = os.path.join(output_folder, f"{output_name}_qadjust_final.txt")
-    if not qadjust_skip:
-        if (video_width * video_height) >= 1520640:
-            qadjust_skip = 2
-        else:
-            qadjust_skip = 1
-    percentile_5_total_firstpass = []
+
+    # Collect default values from commandline parameters
+    if encoder == 'rav1e':
+        default_values = {
+            "speed": cpu,
+            "quantizer": q,
+            "keyint": video_framerate * 10,
+            "threads": threads,
+        }
+        if master_display:
+            default_values['mastering-display'] = '"' + master_display + '"'
+            default_values['content-light'] = max_cll
+    elif encoder == 'svt':
+        default_values = {
+            "preset": cpu,
+            "lp": threads,
+        }
+        if master_display:
+            default_values['mastering-display'] = '"' + master_display + '"'
+            default_values['content-light'] = max_cll
+            default_values['enable-hdr'] = 1
+            default_values['chroma-sample-position'] = 2
+    elif encoder == 'x265':
+        default_values = {
+            "log-level": -1,
+            "pools": threads,
+            "min-keyint": video_framerate * 10,
+            "keyint": video_framerate * 10,
+        }
+        if master_display:
+            default_values['master-display'] = '"' + master_display + '"'
+            default_values['max-cll'] = '"' + max_cll + '"'
+        if video_transfer == 'smpte2084':
+            default_values['colorprim'] = 9
+            default_values['transfer'] = 16
+            default_values['colormatrix'] = 9
+            default_values['chromaloc'] = 2
+            default_values['hdr10'] = ""
+            default_values['hdr10-opt'] = ""
+            default_values['repeat-headers'] = ""
+    else:
+        default_values = {
+            "cpu-used": cpu,
+            "cq-level": q,
+            "threads": threads,
+            "kf-max-dist": video_framerate * 10,
+            "chroma-q-offset-u": -q + 2,
+            "chroma-q-offset-v": -q + 2,
+        }
+
+    default_params, preset_params, base_working_folder = read_presets(presets, encoder)
+    encode_params = {**default_values, **default_params, **preset_params}
+
+    if rpu and encoder == 'svt':
+        print("Dolby Vision mode detected, please note that it is experimental.\n")
+    elif rpu and encoder == 'x265':
+        print("Dolby Vision mode detected, VBV enabled and Level 5.1 set.\n")
+        dovicl = "--level-idc 5.1 --dolby-vision-profile 8.1 --vbv-bufsize 160000 --vbv-maxrate 160000"
+        dovicl = shlex.split(dovicl)
+        i = 0
+        while i < len(dovicl):
+            arg = dovicl[i]
+            if arg.startswith('--'):
+                key = arg[2:]
+                if i + 1 < len(dovicl) and not dovicl[i + 1].startswith('--'):
+                    value = dovicl[i + 1]
+                    dovicl_dict[key] = value
+                    i += 2
+                else:
+                    dovicl_dict[key] = ''
+                    i += 1
+            else:
+                i += 1
+        encode_params.update(dovicl_dict)
+
+    if extracl:
+        # A workaround in case extracl only contains one parameter
+        if not extracl.endswith(" "):
+            extracl += " "
+        extracl = shlex.split(extracl)
+        i = 0
+        while i < len(extracl):
+            arg = extracl[i]
+            if arg.startswith('--'):
+                key = arg[2:]
+                if i + 1 < len(extracl) and not extracl[i + 1].startswith('--'):
+                    value = extracl[i + 1]
+                    extracl_dict[key] = value
+                    i += 2
+                else:
+                    extracl_dict[key] = ''
+                    i += 1
+            else:
+                i += 1
+        encode_params.update(extracl_dict)
+
+    # Create a list of non-empty parameters in the encoder supported format
+    if encoder in ('svt', 'rav1e', 'x265'):
+        encode_params = [f"--{key} {value}" for key, value in encode_params.items() if value is not None]
+    else:
+        encode_params = [f"--{key}={value}" for key, value in encode_params.items() if value is not None]
+
+    if listparams:
+        print("\nYour working folder:", base_working_folder)
+        print("\nThe default values from the Chunk Norris script:\n")
+        for key, value in default_values.items():
+            print(key, value)
+        print("\nThe default values from presets.ini:\n")
+        for key, value in default_params.items():
+            print(key, value)
+        print("\nThe combined values from the selected preset(s):\n")
+        for key, value in preset_params.items():
+            print(key, value)
+        if extracl:
+            print("\nParameters from extracl:\n")
+            for key, value in extracl_dict.items():
+                print(key, value)
+        if rpu:
+            print("\nParameters from DoVi mode:\n")
+            for key, value in dovicl_dict.items():
+                print(key, value)
+        print("\nAll encoding parameters combined:\n")
+        encode_params = " ".join(encode_params)
+        encode_params = encode_params.replace('  ', ' ')
+        print(encode_params)
+        sys.exit(0)
+
+    # Determine the output folder name based on the encode_script
+    output_folder_name = os.path.splitext(os.path.basename(encode_script))[0]
+    output_folder_name = os.path.join(base_working_folder, output_folder_name)
+
+    # Naming for the Avisynth scripts, encoded chunks, and output folders and base filename
+    output_folder = os.path.join(output_folder_name, "output")
+    scripts_folder = os.path.join(output_folder_name, "scripts")
+    chunks_folder = os.path.join(output_folder_name, "chunks")
+    output_name = os.path.splitext(os.path.basename(encode_script))[0]
+
+    # Define final video file name
+    if encoder != 'x265':
+        output_final = os.path.join(output_folder, f"{output_name}.mkv")
+    elif encoder == 'x265' and use_mkvmerge:
+        output_final = os.path.join(output_folder, f"{output_name}.mkv")
+    else:
+        output_final = os.path.join(output_folder, f"{output_name}.mp4")
+
+    # Qadjust related variables
+    qadjust_results_file = os.path.join(output_folder, f"{output_name}_qadjust.json")
+    qadjust_final_results_file = os.path.join(output_folder, f"{output_name}_qadjust_final.json")
+    qadjust_firstpass_data = {}
+    qadjust_final_data = {}
     average_firstpass = 0
-    chunklist = calculate_ssimu2(chunklist, qadjust_skip)
-    qadjust_cycle = 2
-    clean_files(chunks_folder, 'encoded')
-    encode_commands = []
-    input_files = []
-    encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle)
+    reuse_qadjust = False
+
+    # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
+    if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
+        if os.path.exists(qadjust_results_file):
+            user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
+            if user_choice == 'y' or user_choice == '':
+                reuse_qadjust = True
+                with open(qadjust_results_file, 'r') as file:
+                    qadjust_firstpass_data = json.load(file)
+        print(f"Cleaning up the existing folder: {output_folder_name}\n")
+        clean_folder(output_folder_name)
+
+    # Create directories if they don't exist
+    os.makedirs(output_folder, exist_ok=True)
+    os.makedirs(scripts_folder, exist_ok=True)
+    os.makedirs(chunks_folder, exist_ok=True)
+
+    encode_log_file = os.path.join(output_folder, f"encode_log.txt")
+    logging.basicConfig(filename=encode_log_file, format='%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
+    logging.info("Process started.")
+
+    if reuse_qadjust is True:
+        logging.info("Processed existing qadjust data from the JSON file.")
+        with open(qadjust_results_file, 'w') as results_file:
+            json.dump(qadjust_firstpass_data, results_file, indent=4)
+
+    # Grain table creation, only for AV1
+    if encoder != 'x265':
+        # Generate the FGS analysis file names
+        output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
+        output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.ivf")
+        output_grain_table = os.path.split(encode_script)[0]
+        output_grain_table_baseline = os.path.join(output_grain_table, f"{output_name}_grain_baseline.tbl")
+        output_grain_table = os.path.join(output_grain_table, f"{output_name}_grain.tbl")
+
+        start_time = datetime.now()
+        if create_graintable:
+            try:
+                create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
+                                 output_grain_table_baseline)
+                end_time = datetime.now()
+                graintable_time = end_time - start_time
+                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                print("Graintable created successfully, the path is:", output_grain_table)
+            except Exception as e:
+                logging.error(f"Graintable creation failed, please check your script and settings. Exception code {e}")
+                print("Graintable creation failed, please check your script and settings.\n")
+                sys.exit(1)
+            sys.exit(0)
+        # Create the reference files for FGS
+        if encoder == 'svt':
+            if graintable_method > 0:
+                create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
+                                 output_grain_table_baseline)
+                end_time = datetime.now()
+                graintable_time = end_time - start_time
+                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                if qadjust_cycle != 1:
+                    encode_params.append(f"--fgs-table \"{output_grain_table}\"")
+            elif graintable:
+                if qadjust_cycle != 1:
+                    encode_params.append(f"--fgs-table \"{graintable}\"")
+        elif encoder == 'rav1e':
+            if graintable_method > 0:
+                create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
+                                 output_grain_table_baseline)
+                end_time = datetime.now()
+                graintable_time = end_time - start_time
+                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                encode_params.append(f"--film-grain-table \"{output_grain_table}\"")
+            elif graintable:
+                encode_params.append(f"--film-grain-table \"{graintable}\"")
+        else:
+            if graintable_method > 0:
+                create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
+                                 output_grain_table_baseline)
+                end_time = datetime.now()
+                graintable_time = end_time - start_time
+                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
+            elif graintable:
+                encode_params.append(f"--film-grain-table=\"{graintable}\"")
+
+    # Encode only the sample if start and end frames are supplied, exit afterwards.
+    if sample_start_frame is not None and sample_end_frame is not None:
+        encode_sample(output_folder, encode_script, encode_params, rpu, encoder, sample_start_frame, sample_end_frame, video_length, decode_method, threads, q)
+        sys.exit(0)
+
+    # Detect scene changes
+    scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
+    scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
+    scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+    if scd_method in (5, 6):
+        create_scxvid_file(scene_change_csv, scd_method, scd_tonemap, encode_script, cudasynth, downscale_scd, scd_script, scene_change_file_path)
+    scene_changes = scene_change_detection(scd_script, scd_method, scdthresh, encode_script, scd_tonemap, cudasynth, downscale_scd, scene_change_csv, output_folder_name, min_chunk_length)
+    logging.info("Finished processing the scene change data.")
+
+    # Create the AVS scripts, prepare encoding and concatenation commands for chunks
+    encode_commands = []  # List to store the encoding commands
+    input_files = []  # List to store input files for concatenation
+    chunklist = []  # Helper list for producing the encoding and concatenation lists
+    qadjust_original_file = os.path.join(scripts_folder, f"qadjust_original.avs")
+
+    # Run encoding commands with a set maximum of concurrent processes
+    stored_encode_params = encode_params.copy()
+    encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scd_method, scene_changes, video_length, scene_change_csv,
+                                                                                               credits_start_frame, min_chunk_length, q, credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file,
+                                                                                               video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, cpu, credits_cpu, qadjust_crop, qadjust_crop_values)
     encode_params_displist = " ".join(encode_params)
     encode_params_displist = encode_params_displist.replace('  ', ' ')
-    print("The encoder parameters for the final encode:", encode_params_displist)
-    print("\n")
-    start_time = datetime.now()
-    run_encode()
-    concatenate(chunks_folder, input_files, output_final, fr)
-    if qadjust_verify:
-        calculate_ssimu2(chunklist, qadjust_skip)
 
-end_time_total = datetime.now()
-total_duration = end_time_total - start_time_total
-logging.info(f"Process finished, total duration {total_duration}.")
+    start_time = datetime.now()
+    if qadjust is True:
+        output_final_ssimu2 = os.path.join(output_folder, f"{output_name}_ssimu2.mkv")
+        percentile_5_total_firstpass = []
+        if not qadjust_skip:
+            if (video_width * video_height) >= 1520640:
+                qadjust_skip = 2
+            else:
+                qadjust_skip = 1
+        if reuse_qadjust is True:
+            reused_q_values = [chunk['adjusted_Q'] for chunk in qadjust_firstpass_data['chunks']]
+            reused_percentile_values = [chunk['percentile_5th'] for chunk in qadjust_firstpass_data['chunks']]
+            chunklist = sorted(chunklist, key=lambda x: x['chunk'], reverse=False)
+            if credits_start_frame:
+                qadjust_chunks = len(chunklist) - 1
+            else:
+                qadjust_chunks = len(chunklist)
+            for i in range(qadjust_chunks):
+                chunklist[i]['q'] = reused_q_values[i]
+                percentile_5_total_firstpass.append(reused_percentile_values[i])
+            chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
+        else:
+            logging.info("Set up chunklist and corresponding encode commands for the Q adjust phase.")
+            print("The encoder parameters for the analysis:", encode_params_displist)
+            print("\n")
+            run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time)
+            concatenate(chunks_folder, input_files, output_final_ssimu2, fr, use_mkvmerge, encoder)
+            chunklist, average_firstpass = calculate_ssimu2(chunklist, qadjust_skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, video_matrix, qadjust_verify, percentile_5_total_firstpass,
+                                                            encoder, q, br, qadjust_results_file, qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass)
+        qadjust_cycle = 2
+        clean_files(chunks_folder, 'encoded')
+        encode_commands = []
+        input_files = []
+        encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scd_method, scene_changes, video_length, scene_change_csv,
+                                                                                                   credits_start_frame, min_chunk_length, q, credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file,
+                                                                                                   video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, cpu, credits_cpu, qadjust_crop, qadjust_crop_values)
+        encode_params_displist = " ".join(encode_params)
+        encode_params_displist = encode_params_displist.replace('  ', ' ')
+        print("The encoder parameters for the final encode:", encode_params_displist)
+        print("\n")
+        start_time = datetime.now()
+        run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time)
+        concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
+        if qadjust_verify:
+            calculate_ssimu2(chunklist, qadjust_skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, video_matrix, qadjust_verify, percentile_5_total_firstpass, encoder, q, br,
+                             qadjust_results_file, qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass)
+    else:
+        logging.info("Set up chunklist and corresponding encode commands for the final encode.")
+        print("The encoder parameters for the final encode:", encode_params_displist)
+        print("\n")
+        run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time)
+        concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
+
+    end_time_total = datetime.now()
+    total_duration = end_time_total - start_time_total
+    logging.info(f"Process finished, total duration {total_duration}.")
+
+
+if __name__ == "__main__":
+    main()

@@ -57,7 +57,7 @@ The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
 
 4. The encoding queue is ordered from longest to shortest chunk. This ensures that there will not be any single long encodes running at the end.
    
-5. If you have enabled the creation of a grain table or supply it with a separate parameter, it is applied during the encode.
+5. If you have enabled the creation of a grain table or supply it with a separate parameter, it is applied during the encoding process.
 
 6. You can control the amount of parallel encodes by a CLI parameter. Tune the amount according to your system, both CPU and memory-wise.
    
@@ -162,7 +162,7 @@ The lower resolution tables often contain a little more, or sharper grain compar
 **--scd-method**: Defines the method for scene change detection.
 - --scd-method 0 uses a QP file style list (with only keyframes) of scene changes. It attempts to find the file from the path where the encoding script is, searching also in subfolders if needed.
 - --scd-method 1 uses ffmpeg for detection, and uses a separate Avisynth script. If it finds one from the encoding script path with the same name as the encoding script with '_scd' added at the end, it uses that.
-  Otherwise a new file will be created based on the encoding script, loading only the source. Please make sure the source is loaded in the first line of the encoding script!
+  Otherwise, a new file will be created based on the encoding script, loading only the source. Please make sure the source is loaded in the first line of the encoding script!
 - --scd-method 2 uses ffmpeg for detection, and uses the encoding script to do it.
 - --scd-method 3 uses PySceneDetect for detection and a separate script like in method 1.
 - --scd-method 4 uses PySceneDetect for detection and the encoding script like in method 2.
@@ -217,7 +217,7 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 - Example: --extracl "--no-sao --rskip 0"
 - Default: None
 
-**--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used so you can validate for example the film grain/photon noise level using this parameter pair.
+**--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used, so you can validate for example the film grain/photon noise level using this parameter pair.
 - Example: --sample-start-frame 10200 --sample-end-frame 10500
 - Default: None
 
@@ -229,10 +229,11 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 **--list-parameters**: Outputs a list of parameters that the selected encoder would use with your settings.
 
-**--qadjust**: ** EXPERIMENTAL ** Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to make the final quality level more constant.
-The chunk data is output into the 'output' folder for validation. Works on svt-av1 and x265.
+**--qadjust**: Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to make the final quality level more constant.
+The chunk analysis data is output into the 'output' folder for validation. Works on svt-av1 and x265.
 Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
 Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2.
+The results are saved in the output folder in a separate JSON file. If the script finds an existing result file, it prompts you to either reuse the results or recreate the file.
 
 **--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a very long time as it uses the complete encoding script.**
 
@@ -244,7 +245,12 @@ Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2
 - Example: --qadjust-skip 4
 - Default: 1 for resolutions less than HD and 2 for HD and above
 
-**--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1 
+**--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1
+
+**--qadjust-crop**: Defines the cropping that you want to do before the analysed video is resized. Use this if you don't already crop the source while loading it (which you can do for example in DGSource), so you will ensure that the analysed video
+properties correspond to the final encoded video.
+- Example: --qadjust-crop 0,280,0,280
+- Default: 0,0,0,0
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
