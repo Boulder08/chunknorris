@@ -27,19 +27,11 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
 - aomenc (the lavish mod is recommended) / svt-av1-psy (see below for Discord channel with compatible binaries) / rav1e / x265
 - grav1synth (in case of --graintable-method 1)
+- Vapoursynth in case you want to use the SSIMU2-based Q adjusting feature
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
 
-I built some aomenc-lavish binaries for easy access, find the package here:
-https://drive.google.com/file/d/1h8K0_0P730firYb8cmM0_jCARYn8v53u/view?usp=drive_link **(latest mainline-merge including the new deltaq-mode 6)**
-
-Based on the current (as of November 19th, 2023) source by clybius (thanks!)
-
-The source: https://github.com/Clybius/aom-av1-lavish/tree/opmox/mainline-merge
-
-
-**SVT-AV1 binaries to use with this script**: https://discord.gg/rV6j9fJ4 -> #software
-- if you use svt-av1 to encode, you must use the latest psy binaries with the variance boost patch (at least v6.0)
+**SVT-AV1 binaries to use with this script**: https://github.com/orgs/psy-ex/discussions -> use at least v2.3.0-B or a more recent build
 
 
 ---
@@ -232,10 +224,15 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 **--qadjust**: Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to make the final quality level more constant.
 The chunk analysis data is output into the 'output' folder for validation. Works on svt-av1 and x265.
 Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
-Requires Vapoursynth, vstools, LSMASHSource, fmtconv and vapoursynth-ssimulacra2.
+Requires Vapoursynth, vstools, LSMASHSource, VSHIP/vszip.
 The results are saved in the output folder in a separate JSON file. If the script finds an existing result file, it prompts you to either reuse the results or recreate the file.
 
-**--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a very long time as it uses the complete encoding script.**
+**--qadjust-reuse**: Use this parameter to reuse the existing qadjust JSON file. It will save time for example in case your final encode has crashed etc. and the encoding parameters or filtering remains the same.
+Note that the script will also ask you if you wish to reuse the JSON file in case it finds it while processing.
+
+**--qadjust-only**: Enables the mode which will only produce the qadjust JSON file and skip the final encode.
+
+**--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a VERY long time as it uses the complete encoding script.**
 
 **--qadjust-b** and **--qadjust-c**: Define the 'b' and 'c' parameters for Bicubic resizing in case the final encode's resolution differs from the original one.
 - Example: --qadjust-b -1.0 --qadjust-c 0.06
@@ -243,7 +240,7 @@ The results are saved in the output folder in a separate JSON file. If the scrip
 
 **--qadjust-skip**: Defines how many frames the calculation should skip to speed up the process. Setting skip to 1 means all frames will be used.
 - Example: --qadjust-skip 4
-- Default: 1 for resolutions less than HD and 2 for HD and above
+- Default: 1 for resolutions less than HD and 3 for HD and above
 
 **--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1
 
@@ -251,6 +248,10 @@ The results are saved in the output folder in a separate JSON file. If the scrip
 properties correspond to the final encoded video.
 - Example: --qadjust-crop 0,280,0,280
 - Default: 0,0,0,0
+
+**--qadjust-threads**: Sets the number of threads for Vapoursynth. In case of VSHIP, you may need to set a lower amount if its internal adjusting method still uses too much GPU memory.
+- Example: --qadjust-threads 8
+- Default: for vszip and the deprecated vapoursynth-ssimulacra2, the number of detected threads - 2. For VSHIP, Vapoursynth default.
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 

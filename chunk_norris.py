@@ -23,8 +23,11 @@ import configparser
 import copy
 import shlex
 import logging
+import gc
+import multiprocessing
 from datetime import datetime
 from tqdm import tqdm
+from collections import defaultdict
 
 
 def get_video_props(video_path):
@@ -40,20 +43,24 @@ def get_video_props(video_path):
         video_framerate = int(math.ceil(num/denom))
         try:
             video_transfer = str(video_stream['color_transfer'])
+            logging.info(f"Detected transfer characteristics is \"{video_transfer}\".")
         except Exception as e:
+            if video_width > 1920:
+                video_transfer = 'smpte2084'
+            else:
+                video_transfer = '709'
             logging.warning(f"Could not detect the source video transfer characteristics. Exception code {e}")
-            logging.warning("Setting transfer to \"unknown\".")
-            video_transfer = 'unknown'
+            logging.warning(f"Setting transfer to \"{video_transfer}\".")
         try:
             video_matrix = str(video_stream['color_space'])
+            logging.info(f"Detected colormatrix is \"{video_matrix}\".")
         except Exception as e:
-            logging.warning(f"Could not detect the source video colormatrix. Exception code {e}")
             if video_transfer == 'smpte2084':
-                logging.warning("Setting matrix to \"2020ncl\".")
                 video_matrix = '2020ncl'
             else:
-                logging.warning("Setting matrix to \"709\".")
                 video_matrix = '709'
+            logging.warning(f"Could not detect the source video colormatrix. Exception code {e}")
+            logging.warning(f"Setting matrix to \"{video_matrix}\".")
         video_matrix = video_matrix.replace("bt2020nc", "2020ncl")
         video_matrix = video_matrix.replace("bt", "")
         video_matrix = video_matrix.replace("smpte", "")
@@ -763,6 +770,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                                  '--rdoq-level ': '--rdoq-level 2',
                                  '--rc-lookahead ': '--rc-lookahead 40',
                                  '--lookahead-slices ': '--lookahead-slices 0',
+                                 '--subme ': '--subme 3',
+                                 '--me ': '--me umh',
                                  '--b-adapt ': '--b-adapt 2'}
             encode_params_original = [
                 next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
@@ -786,6 +795,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
             if qadjust_crop != '0,0,0,0':
                 qadjust_script.write(f'Crop({qadjust_crop_values[0]}, {qadjust_crop_values[1]}, -{abs(qadjust_crop_values[2])}, -{abs(qadjust_crop_values[3])})\n')
             qadjust_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
+            qadjust_script.write('ConvertBits(10)')
     for i in chunklist:
         if qadjust_cycle == 1 and i['credits'] == 1:
             continue
@@ -894,6 +904,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                     "x265.exe",
                     "--y4m",
                     "--no-progress",
+                    f'--frames {i['length']}',
                     *encode_params,
                     "--output", '"'+output_chunk+'"',
                     "--input", "-"
@@ -904,6 +915,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                     "x265.exe",
                     "--y4m",
                     "--no-progress",
+                    f'--frames {i['length']}',
                     *encode_params,
                     "--output", '"' + output_chunk + '"',
                     "--input", "-"
@@ -912,7 +924,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
         encode_commands.append((decode_command, enc_command, output_chunk))
     # print (encode_commands)
     chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in chunklist}
-    # print (chunklist)
+    # for i in chunklist:
+    # print(i['chunk'], i['length'], i['q'])
     if qadjust_cycle != 1:
         logging.info(f"Total {len(chunklist)} chunks created.")
     return encode_commands, input_files, chunklist, chunklist_dict, encode_params
@@ -1363,10 +1376,35 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
     logging.info(f"Total encoding time {encoding_time}.")
 
 
-def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, video_matrix, qadjust_verify, percentile_5_total_firstpass, encoder, q, br, qadjust_results_file,
-                     qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass):
+def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, qadjust_verify, percentile_5_total_firstpass, encoder, q, br, qadjust_results_file,
+                     qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass, video_matrix, qadjust_threads):
     import vapoursynth as vs
     core = vs.core
+    core.max_cache_size = 2048
+    num_threads = 0
+
+    plugin_keys = [plugin.identifier for plugin in core.plugins()]
+    if 'com.lumen.vship' in plugin_keys:
+        print("Using Vapoursynth-HIP-SSIMU2 to calculate the SSIMU2 score.")
+        qadjust_method = 1
+    elif 'com.julek.vszip' in plugin_keys:
+        print("Using vapoursynth-zip to calculate the SSIMU2 score.")
+        qadjust_method = 2
+    elif 'com.julek.ssimulacra2' in plugin_keys:
+        print("Using the deprecated vapoursynth-ssimulacra2 to calculate the SSIMU2 score. Please consider upgrading to Vapoursynth-HIP-SSIMU2 or vapoursynth-zip.")
+        qadjust_method = 3
+    else:
+        print("Unable to find a Vapoursynth module to do the SSIMU2 score calculation, exiting.")
+        logging.error("Unable to find a Vapoursynth module to do the SSIMU2 score calculation, exiting.")
+        sys.exit(1)
+
+    if qadjust_threads == 0:
+        if qadjust_method in (2, 3):
+            num_threads = max(1, multiprocessing.cpu_count() - 2)
+    else:
+        num_threads = qadjust_threads
+    core.num_threads = num_threads
+
     if qadjust_cycle == 1:
         src = core.avisource.AVIFileSource(fr"{qadjust_original_file}")
         enc = core.lsmas.LWLibavSource(source=f"{output_final_ssimu2}", cache=0)
@@ -1375,8 +1413,12 @@ def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, outp
     else:
         src = core.avisource.AVIFileSource(fr"{encode_script}")
         enc = core.lsmas.LWLibavSource(source=f"{output_final}", cache=0)
-    source_clip = src.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix).fmtc.transfer(transs="srgb", transd="linear", bits=32)
-    encoded_clip = enc.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix).fmtc.transfer(transs="srgb", transd="linear", bits=32)
+    if qadjust_method == 1:
+        src = src.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix)
+        enc = enc.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix)
+    elif qadjust_method == 3:
+        src = src.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix).fmtc.transfer(transs="srgb", transd="linear", bits=32)
+        enc = enc.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix).fmtc.transfer(transs="srgb", transd="linear", bits=32)
     percentile_5_total = []
     total_ssim_scores: list[int] = []
     chunklist = sorted(chunklist, key=lambda x: x['chunk'], reverse=False)
@@ -1392,12 +1434,18 @@ def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, outp
             progress_bar.update(1)
             continue
         if skip == 1:
-            cut_source_clip = source_clip[chunklist[i]['start']:chunklist[i]['end'] + 1]
-            cut_encoded_clip = encoded_clip[chunklist[i]['start']:chunklist[i]['end'] + 1]
+            cut_source_clip = src[chunklist[i]['start']:chunklist[i]['end'] + 1]
+            cut_encoded_clip = enc[chunklist[i]['start']:chunklist[i]['end'] + 1]
         else:
-            cut_source_clip = source_clip[chunklist[i]['start']:chunklist[i]['end'] + 1].std.SelectEvery(cycle=skip, offsets=0)
-            cut_encoded_clip = encoded_clip[chunklist[i]['start']:chunklist[i]['end'] + 1].std.SelectEvery(cycle=skip, offsets=0)
-        result = cut_source_clip.ssimulacra2.SSIMULACRA2(cut_encoded_clip)
+            cut_source_clip = src[chunklist[i]['start']:chunklist[i]['end'] + 1].std.SelectEvery(cycle=skip, offsets=0)
+            cut_encoded_clip = enc[chunklist[i]['start']:chunklist[i]['end'] + 1].std.SelectEvery(cycle=skip, offsets=0)
+        if qadjust_method == 1:
+            result = core.vship.SSIMULACRA2(cut_source_clip, cut_encoded_clip)
+        elif qadjust_method == 2:
+            result = core.vszip.Metrics(cut_source_clip, cut_encoded_clip, mode=0)
+        else:
+            result = cut_source_clip.ssimulacra2.SSIMULACRA2(cut_encoded_clip)
+
         chunk_ssim_scores: list[int] = []
 
         for index, frame in enumerate(result.frames()):
@@ -1415,6 +1463,8 @@ def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, outp
         progress_bar.set_postfix({'Median score': pbar_median})
 
     progress_bar.close()
+    del core, src, enc, cut_source_clip, cut_encoded_clip
+    gc.collect()
     (average, percentile_5) = calculate_standard_deviation(total_ssim_scores)
     if qadjust_verify and qadjust_cycle == 1:
         average_firstpass = average
@@ -1473,7 +1523,39 @@ def calculate_ssimu2(chunklist, skip, qadjust_cycle, qadjust_original_file, outp
     end_time = datetime.now()
     ssimu_time = end_time - start_time
     logging.info(f"SSIMU2 calculation finished, duration {ssimu_time}.")
+
+    # Calculate and visualize the proportions by new q
     if qadjust_cycle == 1:
+        filtered_chunks = [chunk for chunk in chunklist if chunk['credits'] == 0]
+        length_by_q = defaultdict(int)
+        total_length = 0
+        bar_width = 50
+        proportion_range = 5
+        default_q = q
+        for chunk in filtered_chunks:
+            length_by_q[chunk['q']] += chunk['length']
+            total_length += chunk['length']
+        proportions = {q: length / total_length for q, length in length_by_q.items()}
+        if default_q not in proportions:
+            higher_candidates = [q for q in proportions if q > default_q]
+            lower_candidates = [q for q in proportions if q < default_q]
+            # Fallback logic
+            if higher_candidates:
+                default_q = min(higher_candidates)  # Use the next higher q
+            elif lower_candidates:
+                default_q = max(lower_candidates)  # Use the closest lower q
+        higher = [(q, proportions[q]) for q in proportions if q > default_q]
+        lower = [(q, proportions[q]) for q in proportions if q < default_q]
+        higher = sorted(higher, key=lambda item: abs(item[0] - default_q))[:proportion_range]
+        lower = sorted(lower, key=lambda item: abs(item[0] - default_q))[:proportion_range]
+        higher = sorted(higher, key=lambda item: item[0], reverse=True)
+        lower = sorted(lower, key=lambda item: item[0], reverse=True)
+        selected_proportions = higher + [(default_q, proportions[default_q])] + lower
+        print(f"New q values centered around '{default_q:.2f}'")
+        for q, proportion in selected_proportions:
+            bar = '#' * int(proportion * bar_width)
+            print(f"{q:.2f}: {bar.ljust(bar_width)} {proportion:.2%}")
+        print("\n")
         chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
         return chunklist, average_firstpass
 
@@ -1486,7 +1568,7 @@ def main():
     parser.add_argument('--cpu', nargs='?', default=2, type=int)
     parser.add_argument('--threads', nargs='?', type=int)
     parser.add_argument('--q', nargs='?', type=float)
-    parser.add_argument('--min-chunk-length', nargs='?', default=64, type=int)
+    parser.add_argument('--min-chunk-length', nargs='?', type=int)
     parser.add_argument('--max-parallel-encodes', nargs='?', default=4, type=int)
     parser.add_argument('--graintable-method', nargs='?', default=1, type=int)
     parser.add_argument('--graintable-sat', nargs='?', type=float)
@@ -1510,12 +1592,15 @@ def main():
     parser.add_argument('--cudasynth', action='store_true')
     parser.add_argument('--list-parameters', action='store_true')
     parser.add_argument('--qadjust', action='store_true')
+    parser.add_argument('--qadjust-reuse', action='store_true')
+    parser.add_argument('--qadjust-only', action='store_true')
     parser.add_argument('--qadjust-verify', action='store_true')
     parser.add_argument('--qadjust-b', nargs='?', default=-0.5, type=float)
     parser.add_argument('--qadjust-c', nargs='?', default=0.25, type=float)
     parser.add_argument('--qadjust-skip', nargs='?', type=int)
     parser.add_argument('--qadjust-cpu', nargs='?', default=4, type=int)
     parser.add_argument('--qadjust-crop', nargs='?', default='0,0,0,0', type=str)
+    parser.add_argument('--qadjust-threads', nargs='?', type=int)
 
     # Command-line arguments
     args = parser.parse_args()
@@ -1549,6 +1634,8 @@ def main():
     listparams = args.list_parameters
     create_graintable = args.create_graintable
     qadjust = args.qadjust
+    qadjust_only = args.qadjust_only
+    qadjust_reuse = args.qadjust_reuse
     qadjust_verify = args.qadjust_verify
     qadjust_b = args.qadjust_b
     qadjust_c = args.qadjust_c
@@ -1556,6 +1643,7 @@ def main():
     qadjust_cpu = args.qadjust_cpu
     qadjust_crop = args.qadjust_crop
     qadjust_crop_values = '0,0,0,0'
+    qadjust_threads = args.qadjust_threads
     extracl_dict = {}
     dovicl_dict = {}
 
@@ -1580,7 +1668,7 @@ def main():
     elif threads and 1 > threads > 64:
         print("Threads must be 1-64.\n")
         sys.exit(1)
-    elif 5 > min_chunk_length > 999999:
+    elif min_chunk_length and 5 > min_chunk_length > 999999:
         print("Minimum chunk length must be 5-999999.\n")
         sys.exit(1)
     elif 1 > max_parallel_encodes > 64:
@@ -1739,6 +1827,10 @@ def main():
         br = 10
     else:
         br = 2
+    if not min_chunk_length:
+        min_chunk_length = math.ceil(video_framerate)
+    if not qadjust_threads:
+        qadjust_threads = 0
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -1759,7 +1851,6 @@ def main():
         if master_display:
             default_values['mastering-display'] = '"' + master_display + '"'
             default_values['content-light'] = max_cll
-            default_values['enable-hdr'] = 1
             default_values['chroma-sample-position'] = 2
     elif encoder == 'x265':
         default_values = {
@@ -1894,10 +1985,14 @@ def main():
 
     # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
     if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
-        if os.path.exists(qadjust_results_file):
-            user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
-            if user_choice == 'y' or user_choice == '':
+        if os.path.exists(qadjust_results_file) and not qadjust_only:
+            if not qadjust_reuse:
+                user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
+                if user_choice == 'y' or user_choice == '':
+                    reuse_qadjust = True
+            else:
                 reuse_qadjust = True
+            if reuse_qadjust:
                 with open(qadjust_results_file, 'r') as file:
                     qadjust_firstpass_data = json.load(file)
         print(f"Cleaning up the existing folder: {output_folder_name}\n")
@@ -1909,6 +2004,8 @@ def main():
     os.makedirs(chunks_folder, exist_ok=True)
 
     encode_log_file = os.path.join(output_folder, f"encode_log.txt")
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
     logging.basicConfig(filename=encode_log_file, format='%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
     logging.info("Process started.")
 
@@ -1918,7 +2015,7 @@ def main():
             json.dump(qadjust_firstpass_data, results_file, indent=4)
 
     # Grain table creation, only for AV1
-    if encoder != 'x265':
+    if encoder != 'x265' and not qadjust_only:
         # Generate the FGS analysis file names
         output_grain_file_lossless = os.path.join(output_folder, f"{output_name}_lossless.mkv")
         output_grain_file_encoded = os.path.join(output_folder, f"{output_name}_encoded.ivf")
@@ -2003,12 +2100,12 @@ def main():
     encode_params_displist = encode_params_displist.replace('  ', ' ')
 
     start_time = datetime.now()
-    if qadjust is True:
+    if qadjust or qadjust_only:
         output_final_ssimu2 = os.path.join(output_folder, f"{output_name}_ssimu2.mkv")
         percentile_5_total_firstpass = []
         if not qadjust_skip:
-            if (video_width * video_height) >= 1520640:
-                qadjust_skip = 2
+            if (video_width * video_height) > 921600:
+                qadjust_skip = 3
             else:
                 qadjust_skip = 1
         if reuse_qadjust is True:
@@ -2029,8 +2126,11 @@ def main():
             print("\n")
             run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time)
             concatenate(chunks_folder, input_files, output_final_ssimu2, fr, use_mkvmerge, encoder)
-            chunklist, average_firstpass = calculate_ssimu2(chunklist, qadjust_skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, video_matrix, qadjust_verify, percentile_5_total_firstpass,
-                                                            encoder, q, br, qadjust_results_file, qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass)
+            chunklist, average_firstpass = calculate_ssimu2(chunklist, qadjust_skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, qadjust_verify, percentile_5_total_firstpass, encoder, q, br,
+                                                            qadjust_results_file, qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass, video_matrix, qadjust_threads)
+            if qadjust_only:
+                sys.exit(0)
+
         qadjust_cycle = 2
         clean_files(chunks_folder, 'encoded')
         encode_commands = []
@@ -2046,8 +2146,8 @@ def main():
         run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time)
         concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
         if qadjust_verify:
-            calculate_ssimu2(chunklist, qadjust_skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, video_matrix, qadjust_verify, percentile_5_total_firstpass, encoder, q, br,
-                             qadjust_results_file, qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass)
+            calculate_ssimu2(chunklist, qadjust_skip, qadjust_cycle, qadjust_original_file, output_final_ssimu2, encode_script, output_final, qadjust_verify, percentile_5_total_firstpass, encoder, q, br,
+                             qadjust_results_file, qadjust_final_results_file, qadjust_firstpass_data, qadjust_final_data, average_firstpass, video_matrix, qadjust_threads)
     else:
         logging.info("Set up chunklist and corresponding encode commands for the final encode.")
         print("The encoder parameters for the final encode:", encode_params_displist)
