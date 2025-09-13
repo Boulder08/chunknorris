@@ -2,7 +2,6 @@
 
 A Python script for chunked encoding using an AV1 or x265 CLI encoder
 
-
 ---
 
 
@@ -20,18 +19,16 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 
 - Python 3.10.x (or a compatible 3.x version) + support modules (see the beginning of the script)
 - (A scene change list in x264/x265 QP file format)
-- Avisynth+ (+ the SCXviD plugin if scdmethod 5 or 6)
+- Avisynth+ (+ the SCXviD plugin if scdmethod 2)
 - (avs2yuv64 (well, the 32-bit one also works if your whole chain is 32-bit, just rename it to avs2yuv64.exe))
 - ffmpeg
-- PySceneDetect (Python module) **Note that you need to install the module using pip and also install MoviePy. When running Chunk Norris, do not worry about the error messages it shows using PySceneDetect.**
+- av-scenechange if scdmethod 1 is enabled
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
-- aomenc (the lavish mod is recommended) / svt-av1-psy (see below for Discord channel with compatible binaries) / rav1e / x265
+- aomenc (the lavish mod is recommended) / svt-av1-psyex/hdr / rav1e / x265
 - grav1synth (in case of --graintable-method 1)
-- Vapoursynth in case you want to use the SSIMU2-based Q adjusting feature
+- Vapoursynth in case you want to use the metrics based Q adjusting feature
 
 Additionally, make sure that all the tools are accessible from your system's PATH or in the directory where you run this script.
-
-**SVT-AV1 binaries to use with this script**: https://github.com/orgs/psy-ex/discussions -> use at least v2.3.0-B or a more recent build
 
 
 ---
@@ -84,20 +81,6 @@ To use **Chunk Norris**, run the script from the command line with the following
 python chunk_norris.py encode_script [options]
 ```
 
-
----
-
-
-## Some ideas for number of parallel encodes
-
-I've found these numbers generally saturating the CPU near ~100% on aomenc but not go overboard, using a Ryzen 5950X (16c/32t):
-- 1440p : 6
-- 1080p : 8
-- 720p : 10
-
-Naturally this also depends on the number of tiles, these figures are tested using the pre-made presets. I've used --threads 8 myself with no ill effects on aomenc, svt-av1 uses threads much more so very system- and source dependent!
-
-
 ---
 
 
@@ -126,7 +109,7 @@ Naturally this also depends on the number of tiles, these figures are tested usi
 
 **--min-chunk-length**: Defines the minimum encoded chunk length in frames. If there are detected scenes shorter than this amount, the script combines adjacent scenes until the condition is satisfied.
 - Example: --min-chunk-length 100
-- Default: 64 (the same as --lag-in-frames in the default aomenc parameters)
+- Default: 2 seconds of video, for svt fine-tuned to match the hierachical levels of a GOP optimally
 
 **--max-parallel-encodes**: Defines how many simultaneous encodes may run. Choose carefully, and try to avoid saturating your CPU or exhausting all your memory. Rav1e most likely threads worse so a higher amount is recommended.
 - Example: --max-parallel-encodes 8
@@ -153,25 +136,17 @@ The lower resolution tables often contain a little more, or sharper grain compar
 
 **--scd-method**: Defines the method for scene change detection.
 - --scd-method 0 uses a QP file style list (with only keyframes) of scene changes. It attempts to find the file from the path where the encoding script is, searching also in subfolders if needed.
-- --scd-method 1 uses ffmpeg for detection, and uses a separate Avisynth script. If it finds one from the encoding script path with the same name as the encoding script with '_scd' added at the end, it uses that.
+- --scd-method 1 uses av-scenechange for detection, and uses a separate Avisynth script. If it finds one from the encoding script path with the same name as the encoding script with '_scd' added at the end, it uses that.
   Otherwise, a new file will be created based on the encoding script, loading only the source. Please make sure the source is loaded in the first line of the encoding script!
-- --scd-method 2 uses ffmpeg for detection, and uses the encoding script to do it.
-- --scd-method 3 uses PySceneDetect for detection and a separate script like in method 1.
-- --scd-method 4 uses PySceneDetect for detection and the encoding script like in method 2.
-- --scd-method 5 uses SCXviD for detection and a separate script like in method 1.
-- --scd-method 6 uses SCXviD for detection and the encoding script like in method 2.
-- Example: --scd-method 5
-- Default: 3
+- --scd-method 2 uses SCXviD for detection and a separate script like in method 1.
+- Example: --scd-method 2
+- Default: 1
 
 **--scd-tonemap**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for tone mapping an HDR source in the scene change detection phase (improves accuracy).
 - Example: --scd-tonemap 0
 - Default: 0 for SDR, 1 for HDR sources
 
-**--scdthresh**: Defines the threshold for scene change detection in ffmpeg or PySceneDetect. Lower values mean more scene changes detected, but also more false detections.
-- Example: --scdthresh 0.4
-- Default: 0.3 for --scd-method 1 and 2, 3.0 for --scd-method 3 and 4
-
-**--downscale-scd**: Set this parameter to enable downscaling in the scene change detection script using the factor set by the parameter. Applies if --scd-method is 1, 3 or 5. Improves performance a lot without much effect on accuracy.
+**--downscale-scd**: Set this parameter to enable downscaling in the scene change detection script using the factor set by the parameter. Improves performance a lot without much effect on accuracy.
 - Example: --downscale-scd 2
 - Default: 4
 
@@ -206,7 +181,7 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 **--extracl**: Defines a string of parameters to feed to the encoder in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
 
 **NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --extracl "--no-cutree ".**
-- Example: --extracl "--no-sao --rskip 0"
+- Example: --extracl "--ac-bias 1.5 --film-grain 10"
 - Default: None
 
 **--sample-start-frame** and **--sample-end-frame**: Defines the range to encode a sample from. The normal script and encode settings will be used, so you can validate for example the film grain/photon noise level using this parameter pair.
@@ -221,18 +196,24 @@ For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,1
 
 **--list-parameters**: Outputs a list of parameters that the selected encoder would use with your settings.
 
-**--qadjust**: Enables a special mode for running a faster first pass of the source in order to adjust the Q/CRF value by chunk to make the final quality level more constant.
-The chunk analysis data is output into the 'output' folder for validation. Works on svt-av1 and x265.
-Heavily based on trixoniisama's work available at https://github.com/trixoniisama/auto-boost-algorithm (algo v2.0), thanks!
-Requires Vapoursynth, vstools, LSMASHSource, VSHIP/vszip.
+**--qadjust**: Enables a special mode for running an analysis pass of the source in order to adjust the Q/CRF value by chunk to make the final quality level more constant.
+The chunk analysis data is output to a JSON file into the 'output' folder for validation. Works on svt-av1 (both SSIMU2 and Butteraugli) and x265 (SSIMU2)
+**A lot of the code is from these two wonderful projects - thank you:**
+https://github.com/nekotrix/auto-boost-algorithm (algo v2.0)
+https://github.com/Akatmks/Akatsumekusa-Encoding-Scripts (namely the Butteraugli mean branch)
+
+Requires Vapoursynth, (vstools,) BestSource, VSHIP/vszip.
 The results are saved in the output folder in a separate JSON file. If the script finds an existing result file, it prompts you to either reuse the results or recreate the file.
+
+**--qadjust-mode**: Determines the mode for CRF adjusting. The options are 1 for SSIMU2-based magic number boosting and 2 for Butteraugli target score with two passes.
+Please note that mode 2 works only with SVT-AV1.
+- Example: --qadjust-mode 1
+- Default: 2
 
 **--qadjust-reuse**: Use this parameter to reuse the existing qadjust JSON file. It will save time for example in case your final encode has crashed etc. and the encoding parameters or filtering remains the same.
 Note that the script will also ask you if you wish to reuse the JSON file in case it finds it while processing.
 
 **--qadjust-only**: Enables the mode which will only produce the qadjust JSON file and skip the final encode.
-
-**--qadjust-verify**: Enables a verification pass after the final encode is finished and will output the result in the 'output' folder. **NOTE: this pass can take a VERY long time as it uses the complete encoding script.**
 
 **--qadjust-b** and **--qadjust-c**: Define the 'b' and 'c' parameters for Bicubic resizing in case the final encode's resolution differs from the original one.
 - Example: --qadjust-b -1.0 --qadjust-c 0.06
@@ -243,15 +224,15 @@ Note that the script will also ask you if you wish to reuse the JSON file in cas
 - Default: 1 for resolutions less than HD and 3 for HD and above
 
 **--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1
+- Default: 7
 
-**--qadjust-crop**: Defines the cropping that you want to do before the analysed video is resized. Use this if you don't already crop the source while loading it (which you can do for example in DGSource), so you will ensure that the analysed video
-properties correspond to the final encoded video.
-- Example: --qadjust-crop 0,280,0,280
-- Default: 0,0,0,0
+**--qadjust-workers**: Defines how many parallel workers and threads (for VSHIP) will be launched. Avoid using too high values especially with UHD sources as GPU memory is often the limiting factor
+- Example: --qadjust-workers 4,1
+- Default: 1,1
 
-**--qadjust-threads**: Sets the number of threads for Vapoursynth. In case of VSHIP, you may need to set a lower amount if its internal adjusting method still uses too much GPU memory.
-- Example: --qadjust-threads 8
-- Default: for vszip and the deprecated vapoursynth-ssimulacra2, the number of detected threads - 2. For VSHIP, Vapoursynth default.
+**--qadjust-target**: Defines the target Butteraugli score. Note: if you already have run the analysis and the JSON file is found, you can use --qadjust-reuse and --qadjust-target to recalculate the final CRFs for chunks as needed.
+- Example: --qadjust-target 1.6
+- Default: None
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
@@ -278,7 +259,7 @@ The final concatenated video file will be named based on the input Avisynth scri
 Here's an example of how to use Chunk Norris:
 
 ```bash
-python chunk_norris.py my_video.avs --preset "720p" --q 18 --max-parallel-encodes 4 --scd-method 3
+python chunk_norris.py my_video.avs --preset "720p" --q 18 --max-parallel-encodes 4 --scd-method 1
 ```
 
-This command will use svt-av1 to encode the video specified in my_video.avs using the '720p' preset, a quality level of 18, and a maximum of 4 parallel encoding processes. It uses PySceneDetect for scene change detection.
+This command will use svt-av1 to encode the video specified in my_video.avs using the '720p' preset, a quality level of 18, and a maximum of 4 parallel encoding processes. It uses av-scenechange for scene change detection.
