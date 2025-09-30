@@ -212,6 +212,7 @@ Please note that mode 2 works only with SVT-AV1.
 
 **--qadjust-reuse**: Use this parameter to reuse the existing qadjust JSON file. It will save time for example in case your final encode has crashed etc. and the encoding parameters or filtering remains the same.
 Note that the script will also ask you if you wish to reuse the JSON file in case it finds it while processing.
+Also if you change the minimum chunk length from the value that was used for calculating the metrics, the script will not allow you to use this parameter.
 
 **--qadjust-only**: Enables the mode which will only produce the qadjust JSON file and skip the final encode.
 

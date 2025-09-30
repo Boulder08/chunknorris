@@ -1244,7 +1244,7 @@ def calculate_ssimu2_stats(score_list: list[int]):
     return average, float(np.percentile(filtered_score_list, 5))
 
 
-def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time):
+def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time):
     global interrupted
     global avg_bitrate
     completed_chunks = []  # List of completed chunks
@@ -1306,7 +1306,7 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
     progress_bar.close()
     end_time = datetime.now()
     encoding_time = end_time - start_time
-    if qadjust_cycle not in (1, 2):
+    if qadjust_cycle not in (1, 2) or reuse_qadjust:
         print("Finished encoding the chunks.\n")
         logging.info(f"Final encode finished, average bitrate {avg_bitrate:.2f} kbps.")
     else:
@@ -1338,8 +1338,8 @@ def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qad
     chunk_scores = [s for s in chunk_scores if s > 0]
 
     if not chunk_scores:
-        print(f"Chunk {chunk['chunk']} has only zero-score (black) frames!")
-        logging.info(f"Chunk {chunk['chunk']} has only zero-score (black) frames!")
+        # print(f"Chunk {chunk['chunk']} has only zero-score (black) frames!")
+        # logging.info(f"Chunk {chunk['chunk']} has only zero-score (black) frames!")
         average = 0.0
     else:
         # average = np.mean(chunk_scores)
@@ -1387,7 +1387,7 @@ def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_ma
 
 # noinspection PyTypeChecker,PyUnboundLocalVariable
 def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target, avg_bitrate, avg_bitrate_qadjust_pass1,
-                      phase, video_height):
+                      phase, video_height, min_chunk_length, minkeyint):
     global butter_scores_pass1
     global butter_scores_pass2
     global average_qadjust_pass1
@@ -1479,6 +1479,12 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             all_scores = []
             butter_pass2_crfs = []
 
+            zero_score_chunks = [r[0] for r in results if r[1] == 0.0]  # chunk number where avg == 0
+            if zero_score_chunks:
+                print("Chunks with only zero-score (black) frames:", ", ".join(map(str, zero_score_chunks)))
+                for zc in zero_score_chunks:
+                    logging.info(f"Chunk {zc} has only zero-score (black) frames!")
+
             # Sort by chunk number to match original list
             results.sort(key=lambda x: x[0])
             for chunk_number, rmc, scores, butter_pass2_crf in results:
@@ -1503,6 +1509,12 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
                         results.append(future.result())
                         progress_bar.update(1)
 
+            zero_score_chunks = [r[0] for r in results if r[1] == 0.0]  # chunk number where avg == 0
+            if zero_score_chunks:
+                print("Chunks with only zero-score (black) frames:", ", ".join(map(str, zero_score_chunks)))
+                for zc in zero_score_chunks:
+                    logging.info(f"Chunk {zc} has only zero-score (black) frames!")
+
             butter_scores_pass2.clear()
             all_scores = []
 
@@ -1517,6 +1529,8 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "qadjust_cpu": qadjust_cpu,
             "avg_bitrate": avg_bitrate,
             "ssimu2_harmonic_mean_score": average,
+            "min_chunk_length": min_chunk_length,
+            "min_keyint": minkeyint,
             "chunks": []
         }
     elif phase == 'butter_pass2':
@@ -1525,6 +1539,8 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "butter_target": butter_target,
             "avg_bitrate_qadjust_pass1": avg_bitrate_qadjust_pass1,
             "butteraugli_score_pass1": average_qadjust_pass1,
+            "min_chunk_length": min_chunk_length,
+            "min_keyint": minkeyint,
             "chunks": []
         }
 
@@ -1630,6 +1646,8 @@ def calculate_svt_keyint(video_framerate, target_keyint_seconds, startup_mg_size
         num_regular_mgs = math.ceil(remaining / regular_mg_size)
         aligned_keyint = startup_mg_size + num_regular_mgs * regular_mg_size
 
+    aligned_keyint += 1
+
     return aligned_keyint
 
 
@@ -1679,6 +1697,7 @@ def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, butter_targ
             crf = q
             crfs.append(crf)
             print(f"Fallback CRF {q} used for chunk {chunklist[i]['chunk']}")
+            logging.info(f"Fallback CRF {q} used for chunk {chunklist[i]['chunk']}")
             continue
         if chunklist[i]['q'] > 24.0:
             qstep_pass1, qstep_pass2 = 343, 592
@@ -2156,6 +2175,8 @@ def main():
             min_chunk_length = calculate_svt_keyint(video_framerate, 2, int(startup_mg_size), int(hierarchical_levels))
         else:
             min_chunk_length = math.ceil(video_framerate) * 2
+        print(f"Calculated minimum chunk length is {min_chunk_length} frames.")
+        logging.info(f"Calculated minimum chunk length is {min_chunk_length} frames.")
 
     # Create a list of non-empty parameters in the encoder supported format
     if encoder in ('svt', 'rav1e', 'x265'):
@@ -2226,6 +2247,9 @@ def main():
             if reuse_qadjust:
                 with open(qadjust_results_file, 'r') as file:
                     qadjust_data = json.load(file)
+                    if 'min_chunk_length' in qadjust_data and qadjust_data['min_chunk_length'] != min_chunk_length:
+                        print("The current minimum chunk length does not match the qadjust JSON data file, you must rerun the analysis.")
+                        sys.exit(0)
                     if not butter_target:
                         while True:
                             try:
@@ -2257,6 +2281,9 @@ def main():
         logging.root.removeHandler(handler)
     logging.basicConfig(filename=encode_log_file, format='%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
     logging.info("Process started.")
+    if encoder == 'svt':
+        print(f"Calculated minimum keyint is {minkeyint} frames.")
+        logging.info(f"Calculated minimum keyint is {minkeyint} frames.")
 
     if reuse_qadjust:
         logging.info("Processed existing qadjust data from the JSON file.")
@@ -2392,9 +2419,9 @@ def main():
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_.hevc")
                 print("Running the analysis pass using your final CRF value.")
-                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time = datetime.now())
+                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target,
-                                              avg_bitrate,0,'ssimu2', video_height)
+                                              avg_bitrate,0,'ssimu2', video_height, min_chunk_length, minkeyint)
             # mode 2 = Butteraugli with two passes
             else:
                 if not butter_target:
@@ -2420,14 +2447,14 @@ def main():
                     modified_encode_commands.append((new_avs_cmd, new_enc_cmd, new_out_path))
                 logging.info(f"Started analysis using Butteraugli, pass 1 at CRF 24.0.")
                 print(f"Running the analysis pass 1 at CRF 24.0.")
-                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, modified_encode_commands, chunklist_dict, start_time = datetime.now())
+                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, modified_encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
                 avg_bitrate_qadjust_pass1 = avg_bitrate
                 if encoder != 'x265':
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass1_.ivf")
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass1_.hevc")
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target,
-                                              0, avg_bitrate_qadjust_pass1,'butter_pass1', video_height)
+                                              0, avg_bitrate_qadjust_pass1,'butter_pass1', video_height, min_chunk_length, minkeyint)
                 modified_encode_commands = []
 
                 filtered_chunks = [c for c in chunklist if c.get("credits", 0) != 1]
@@ -2448,13 +2475,13 @@ def main():
                     modified_encode_commands.append((new_avs_cmd, new_enc_cmd, new_out_path))
                 logging.info("Started analysis using Butteraugli, pass 2.")
                 print("Running the analysis pass 2.")
-                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, modified_encode_commands, chunklist_dict, start_time = datetime.now())
+                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, modified_encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
                 if encoder != 'x265':
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass2_.ivf")
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass2_.hevc")
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target,
-                                              0, avg_bitrate_qadjust_pass1,'butter_pass2', video_height)
+                                              0, avg_bitrate_qadjust_pass1,'butter_pass2', video_height, min_chunk_length, minkeyint)
 
             if qadjust_only:
                 try:
@@ -2480,13 +2507,13 @@ def main():
         encode_params_displist = encode_params_displist.replace('  ', ' ')
         print("The encoder parameters for the final encode:", encode_params_displist)
         print("\n")
-        run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time = datetime.now())
+        run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
         concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
     else:
         logging.info("Set up chunklist and corresponding encode commands for the final encode.")
         print("The encoder parameters for the final encode:", encode_params_displist)
         print("\n")
-        run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, start_time = datetime.now())
+        run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
         concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
 
     end_time_total = datetime.now()
