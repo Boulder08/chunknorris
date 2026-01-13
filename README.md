@@ -24,7 +24,7 @@ Before using **Chunk Norris**, ensure you have the following dependencies instal
 - ffmpeg
 - av-scenechange if scdmethod 1 is enabled
 - ffmpeg-python (Python module) **Note that you need to install ffmpeg-python, not ffmpeg**
-- aomenc (the lavish mod is recommended) / svt-av1-psyex/hdr / rav1e / x265
+- svt-av1-hdr / aomenc (the lavish mod is recommended) / rav1e / x265
 - grav1synth (in case of --graintable-method 1)
 - Vapoursynth in case you want to use the metrics based Q adjusting feature
 
@@ -48,9 +48,11 @@ Additionally, make sure that all the tools are accessible from your system's PAT
    
 5. If you have enabled the creation of a grain table or supply it with a separate parameter, it is applied during the encoding process.
 
-6. You can control the amount of parallel encodes by a CLI parameter. Tune the amount according to your system, both CPU and memory-wise.
+6. If you use the qadjust mode, the script will analyse the video and adjust Q/CRF by chunk based on the results and/or your set target score.
+
+7. You can control the amount of parallel encodes by a CLI parameter. Tune the amount according to your system, both CPU and memory-wise.
    
-7. The encoded chunks are concatenated in their original order to a Matroska (AV1, HEVC with mkvmerge) or MP4 (HEVC with ffmpeg) container.
+8. The encoded chunks are concatenated in their original order to a Matroska (AV1, HEVC with mkvmerge) or MP4 (HEVC with ffmpeg) container.
 
 
 ---
@@ -120,8 +122,8 @@ python chunk_norris.py encode_script [options]
 - --graintable-method 1 creates a table based on a user set range.
 - The grain table file is placed in the same folder as the encoding script, named "'encoding_script'_grain.tbl". If it already exists, a new one is not created.
 - Make sure you select a range which represents the source well and does not have any scene cuts to have a constant grain layer - 100-200 frames is good enough.
-- Example: --graintable-method 0
-- Default: 1
+- Example: --graintable-method 1
+- Default: 0
 
 **--graintable-sat**: Defines the level of saturation to have in the graintable analysis clip. The recommended range is 0..1 where 0 means black-and-white and 1 does nothing. Uses the Avisynth+ built-in filter "Tweak".
 - Example: --graintable-sat 0.2
@@ -142,13 +144,15 @@ The lower resolution tables often contain a little more, or sharper grain compar
 - Example: --scd-method 2
 - Default: 1
 
-**--scd-tonemap**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for tone mapping an HDR source in the scene change detection phase (improves accuracy).
-- Example: --scd-tonemap 0
-- Default: 0 for SDR, 1 for HDR sources
+**--scd-tonemap**: Defines if the Avisynth+ plugin DGHDRtoSDR should be used for tone mapping an HDR source in the scene change detection phase.
+- Example: --scd-tonemap 1
+- Default: 0
+
+**--scdetect-only**: Enables the mode for only running the scene change detection.
 
 **--downscale-scd**: Set this parameter to enable downscaling in the scene change detection script using the factor set by the parameter. Improves performance a lot without much effect on accuracy.
-- Example: --downscale-scd 2
-- Default: 4
+- Example: --downscale-scd 4
+- Default: 2
 
 **--decode-method**: Selects between avs2yuv64 or ffmpeg as the application that loads the encoding script and pipes to aomenc. There should not be a difference between the two, but in case of any problems, it might be a good idea to change the decoder.
 - --decode-method 0 uses avs2yuv64.
@@ -170,7 +174,7 @@ The lower resolution tables often contain a little more, or sharper grain compar
 
 **--graintable-cpu**: Defines the '--cpu-used' parameter for the FGS analysis.
 - Example: --graintable-cpu 6
-- Default: 3 for aomenc and svt, 4 for rav1e
+- Default: Same as --cpu
 
 **--master-display** and **--max-cll**: Defines the HDR related mastering display parameters. See https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Parameters.md.
 
@@ -178,9 +182,7 @@ The lower resolution tables often contain a little more, or sharper grain compar
 
 For example --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)" --max-cll "3241,902" would be transformed to --master-display G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.313,0.329)L(4000,0.005) --max-cll 3241,902 when processing and svt-av1 or rav1e is the encoder.
 
-**--extracl**: Defines a string of parameters to feed to the encoder in addition to the preset. Remember to use the equal sign and double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
-
-**NOTE: due to some weird Python issue with command line parameters, you must add a whitespace at the end of the string if it contains only one parameter without an argument. For example --extracl "--no-cutree ".**
+**--extracl**: Defines a string of parameters to feed to the encoder in addition to the preset. Remember to use double quotes, and there is no sanity check! The parameters you enter will override the ones from the default settings and selected presets.
 - Example: --extracl "--ac-bias 1.5 --film-grain 10"
 - Default: None
 
@@ -201,14 +203,16 @@ The chunk analysis data is output to a JSON file into the 'output' folder for va
 **A lot of the code is from these two wonderful projects - thank you:**
 https://github.com/nekotrix/auto-boost-algorithm (algo v2.0)
 https://github.com/Akatmks/Akatsumekusa-Encoding-Scripts (namely the Butteraugli mean branch)
+**A special thank you to Line-fr for creating the Vship plugin!**
+https://codeberg.org/Line-fr/Vship
 
-Requires Vapoursynth, (vstools,) BestSource, VSHIP/vszip.
+Requires Vapoursynth, (vstools,) BestSource, Vship/vszip.
 The results are saved in the output folder in a separate JSON file. If the script finds an existing result file, it prompts you to either reuse the results or recreate the file.
 
-**--qadjust-mode**: Determines the mode for CRF adjusting. The options are 1 for SSIMU2-based magic number boosting and 2 for Butteraugli target score with two passes.
+**--qadjust-mode**: Determines the mode for CRF adjusting. The options are 1 for SSIMU2-based magic number boosting, 2 for Butteraugli target score with two passes and 3 for CVVDP target quality.
 Please note that mode 2 works only with SVT-AV1.
 - Example: --qadjust-mode 1
-- Default: 2
+- Default: 3
 
 **--qadjust-reuse**: Use this parameter to reuse the existing qadjust JSON file. It will save time for example in case your final encode has crashed etc. and the encoding parameters or filtering remains the same.
 Note that the script will also ask you if you wish to reuse the JSON file in case it finds it while processing.
@@ -222,18 +226,39 @@ Also if you change the minimum chunk length from the value that was used for cal
 
 **--qadjust-skip**: Defines how many frames the calculation should skip to speed up the process. Setting skip to 1 means all frames will be used.
 - Example: --qadjust-skip 4
-- Default: 1 for resolutions less than HD and 3 for HD and above
+- Default: 1 for resolutions less than HD and 2 for HD and above with CVVDP, 3 for HD and above with other metrics.
 
 **--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1
 - Default: 7
 
-**--qadjust-workers**: Defines how many parallel workers and threads (for VSHIP) will be launched. Avoid using too high values especially with UHD sources as GPU memory is often the limiting factor
+**--qadjust-workers**: Defines how many parallel workers and threads (for Vship) will be launched. Avoid using too high values especially with UHD sources as GPU memory is often the limiting factor
 - Example: --qadjust-workers 4,1
 - Default: 1,1
 
-**--qadjust-target**: Defines the target Butteraugli score. Note: if you already have run the analysis and the JSON file is found, you can use --qadjust-reuse and --qadjust-target to recalculate the final CRFs for chunks as needed.
-- Example: --qadjust-target 1.6
+**--qadjust-target**: Defines the target Butteraugli or CVVDP score. Note: if you already have run the analysis and the JSON file is found, you can use --qadjust-reuse and --qadjust-target to recalculate the final CRFs for chunks as needed.
+- Example: --qadjust-target 9.8
 - Default: None
+
+**--qadjust-min-q** and **--qadjust-max-q**: Determines the range of allowed q for CVVDP based adjustment. This affects also the probing phase.
+- Example: --qadjust-min-q 15.0 --qadjust-max-q 32.0
+- Default: min 10.0, max 40.0
+
+**--cvvdp-min-luma** and **cvvdp-max-luma**: Determines which range of average luma will have a damping effect when the CVVDP based adjustment raises the q of a chunk due to a better score than the target.
+CVVDP tends to score a little too well with dark frames, and raising q will easily start removing details. These parameters damp the effect in order to prevent this from happening.
+- Example: --cvvdp-min-luma 0.1 --cvvdp-max-luma 0.2
+- Default: min 0.05, max 0.25 for SDR, min 0.1, max 0.5 for HDR
+
+**--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve.
+- Example: --probes 6
+- Default: 8
+
+**--cvvdp-model**: Defines the display model the CVVDP analysis uses. See https://codeberg.org/Line-fr/Vship/src/branch/main/doc/CVVDP.md for more information.
+- Example: --cvvdp-model standard_4k
+- Default: standard_4k for SDR, standard_hdr_pq for HDR
+
+**--cvvdp-config**: Defines the full path to an override JSON file. See https://codeberg.org/Line-fr/Vship/src/branch/main/doc/CVVDP.md for more information and how to use the file.
+Please note that presets.ini contains the key 'model_config_json' which you can use to autoload the file. The example file is one I use in my own encodes for my home theater setup.
+**It is very important to set the parameters according to your own setup to get accurate CVVDP results!**
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 

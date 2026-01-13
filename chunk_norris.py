@@ -20,6 +20,7 @@ import threading
 import warnings
 import ffmpeg
 import numpy as np
+import io
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from datetime import datetime
@@ -31,10 +32,33 @@ active_processes = []
 process_list_lock = threading.Lock()
 butter_scores_pass1 = []
 butter_scores_pass2 = []
+chunk_cvvdp_scores = []
 average_qadjust_pass1 = 0.0
 avg_bitrate = 0.0
 correction_factor = 0.0
 metrics_plugin = 0
+
+logger = logging.getLogger("chunknorris")
+logger.propagate = False
+logger.setLevel(logging.INFO)
+
+formatter = logging.Formatter(
+    "%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# Buffer in memory until file is known
+buffer = io.StringIO()
+buffer_handler = logging.StreamHandler(buffer)
+buffer_handler.setFormatter(formatter)
+logger.addHandler(buffer_handler)
+logger.info("Process started.")
+
+
+def silence_worker():
+    devnull = open(os.devnull, "w")
+    os.dup2(devnull.fileno(), 1)  # stdout
+    os.dup2(devnull.fileno(), 2)  # stderr
 
 
 def analyze_butteraugli_chunk_wrapper(args):
@@ -43,6 +67,10 @@ def analyze_butteraugli_chunk_wrapper(args):
 
 def analyze_ssimu2_chunk_wrapper(args):
     return analyze_ssimu2_chunk(*args)
+
+
+def analyze_cvvdp_chunk_wrapper(args):
+    return analyze_cvvdp_chunk(*args)
 
 
 def get_video_props(video_path):
@@ -57,31 +85,122 @@ def get_video_props(video_path):
         fr = float(num/denom)
         video_framerate = int(math.ceil(num/denom))
         try:
-            video_transfer = str(video_stream['color_transfer'])
-            logging.info(f"Detected transfer characteristics is \"{video_transfer}\".")
+            detected_video_transfer = str(video_stream['color_transfer'])
+            transfer_map = {
+                "bt709": 1,
+                "bt470m": 4,
+                "bt470bg": 5,
+                "smpte170m": 6,
+                "smpte240m": 7,
+                "linear": 8,
+                "log100": 9,
+                "log_sqrt": 10,
+                "iec61966-2-4": 11,
+                "bt1361e": 12,
+                "srgb": 13,
+                "bt2020-10": 14,
+                "bt2020-12": 15,
+                "smpte2084": 16,
+                "smpte428": 17,
+                "arib-std-b67": 18
+            }
+            video_transfer = transfer_map.get(detected_video_transfer.lower())
+            if not isinstance(video_transfer, int):
+                raise ValueError(f"Invalid or unknown transfer characteristics {detected_video_transfer}, please check the transfer_map conversion table in the script.")
+            print(f"Setting transfer characteristics based on autodetection to {detected_video_transfer}.")
+            logger.info(f"Detected transfer characteristics is \"{detected_video_transfer}\".")
         except Exception as e:
+            logger.info(f"Could not detect the source transfer characteristics. Exception code {e}")
             if video_width > 1920:
-                video_transfer = 'smpte2084'
+                video_transfer = 16
+                print("Setting transfer characteristics manually to \"smpte2084\" (HDR).")
+                logger.info("Setting transfer characteristics manually to \"smpte2084\" (HDR).")
             else:
-                video_transfer = '709'
-            logging.warning(f"Could not detect the source video transfer characteristics. Exception code {e}")
-            logging.warning(f"Setting transfer to \"{video_transfer}\".")
-        try:
-            video_matrix = str(video_stream['color_space'])
-            logging.info(f"Detected colormatrix is \"{video_matrix}\".")
-        except Exception as e:
-            if video_transfer == 'smpte2084':
-                video_matrix = '2020ncl'
-            else:
-                video_matrix = '709'
-            logging.warning(f"Could not detect the source video colormatrix. Exception code {e}")
-            logging.warning(f"Setting matrix to \"{video_matrix}\".")
-        video_matrix = video_matrix.replace("bt2020nc", "2020ncl")
-        video_matrix = video_matrix.replace("bt", "")
-        video_matrix = video_matrix.replace("smpte", "")
-        video_matrix = video_matrix.replace("unknown", "709")
+                video_transfer = 1
+                print("Setting transfer characteristics manually  to \"bt709\" (SDR).")
+                logger.info("Setting transfer characteristics manually to \"bt709\" (SDR).")
 
-        return video_width, video_height, video_length, video_transfer, video_matrix, video_framerate, fr
+        try:
+            detected_video_primaries = str(video_stream['color_primaries'])
+            primaries_map = {
+                "bt709": 1,
+                "bt470m": 4,
+                "bt470bg": 5,
+                "smpte170m": 6,
+                "smpte240m": 7,
+                "film": 8,
+                "bt2020": 9,
+                "smpte431": 11,
+                "smpte432": 12,
+                "ebu3213": 13
+            }
+            video_primaries = primaries_map.get(detected_video_primaries.lower())
+            if not isinstance(video_primaries, int):
+                raise ValueError(f"Invalid or unknown color primaries {detected_video_primaries}, please check the primaries_map conversion table in the script.")
+            print(f"Setting color primaries based on autodetection to {detected_video_primaries}.")
+            logger.info(f"Detected color primaries is \"{detected_video_primaries}\".")
+        except Exception as e:
+            logger.info(f"Could not detect the source color primaries characteristics. Exception code {e}")
+            if video_width > 1920:
+                video_primaries = 9
+                print("Setting color primaries to \"bt2020\" (HDR).")
+                logger.info("Setting color primaries manually to \"bt2020\" (HDR).")
+            else:
+                video_primaries = 1
+                print("Setting color primaries manually to \"bt709\" (SDR).")
+                logger.info("Setting color primaries manually to \"bt709\" (SDR).")
+
+        try:
+            detected_video_matrix = str(video_stream['color_space'])
+            matrix_map = {
+                "bt709": 1,
+                "fcc": 4,
+                "bt470bg": 5,
+                "smpte170m": 6,
+                "smpte240m": 7,
+                "ycgco": 8,
+                "bt2020nc": 9
+            }
+            video_matrix = matrix_map.get(detected_video_matrix.lower())
+            if not isinstance(video_matrix, int):
+                raise ValueError(f"Invalid or unknown colorspace {detected_video_matrix}, please check the matrix_map conversion table in the script.")
+            print(f"Setting colorspace based on autodetection to {detected_video_matrix}.")
+            logger.info(f"Detected colorspace is \"{detected_video_matrix}\".")
+        except Exception as e:
+            logger.info(f"Could not detect the source colorspace. Exception code {e}")
+            if video_transfer == 16:
+                video_matrix = 9
+                print("Setting colorspace manually to \"bt2020nc\" (HDR).")
+                logger.info("Setting colorspace manually to \"bt2020nc\" (HDR).")
+            else:
+                video_matrix = 1
+                print("Setting colorspace manually to \"bt709\" (SDR).")
+                logger.info("Setting colorspace manually to \"bt709\" (SDR).")
+
+        try:
+            detected_chroma_location = str(video_stream['chroma_location'])
+            chroma_location_map = {
+                "left": 0,
+                "center": 1,
+                "topleft": 2
+            }
+            chroma_location = chroma_location_map.get(detected_chroma_location.lower())
+            if not isinstance(chroma_location, int):
+                raise ValueError(f"Invalid or unknown colorspace {detected_chroma_location}, please check the chroma_location_map conversion table in the script.")
+            print(f"Setting chroma location based on autodetection to {detected_chroma_location}.")
+            logger.info(f"Detected chroma location is \"{detected_chroma_location}\".")
+        except Exception as e:
+            logger.info(f"Could not detect the source chroma location. Exception code {e}")
+            if video_transfer == 16:
+                chroma_location = 2
+                print("Setting chroma location manually to \"top left (2)\" (HDR).")
+                logger.info("Setting chroma location manually to \"top left (2)\" (HDR).")
+            else:
+                chroma_location = 0
+                print("Setting chroma location manually to \"left (0)\" (SDR).")
+                logger.info("Setting chroma location manually to \"left (0)\" (SDR).")
+
+        return video_width, video_height, video_length, video_transfer, video_matrix, video_primaries, video_framerate, fr, chroma_location
     else:
         print("No video stream found in the input video.")
         sys.exit(1)
@@ -177,16 +296,16 @@ def create_scxvid_file(scene_change_csv, scd_tonemap, encode_script, cudasynth, 
 
     start_time = datetime.now()
     print("Detecting scene changes using SCXviD.\n")
-    logging.info("Detecting scene changes using SCXviD.")
+    logger.info("Detecting scene changes using SCXviD.")
     scd_process = subprocess.Popen(scene_change_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     scd_process.communicate()
     if scd_process.returncode != 0:
-        logging.error(f"Error in scene change detection phase, return code: {scd_process.returncode}")
+        logger.error(f"Error in scene change detection phase, return code: {scd_process.returncode}")
         print("Error in scene change detection phase, return code:", scd_process.returncode)
         sys.exit(1)
     end_time = datetime.now()
     scd_time = end_time - start_time
-    logging.info(f"Scene change detection done, duration {scd_time}.")
+    logger.info(f"Scene change detection done, duration {scd_time}.")
 
     print("Converting logfile to QP file format.\n")
 
@@ -227,7 +346,7 @@ def find_scene_change_file(start_dir, filename):
     return None
 
 
-def create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, video_width, video_height):
+def create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, downscale_scd):
     if not os.path.exists(scd_script):
         print(f"Scene change analysis script not found: {scd_script}, created manually.\n")
         with open(encode_script, 'r') as file:
@@ -241,12 +360,13 @@ def create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene
                 scd_file.write('\n')
                 scd_file.write(cropping)
                 scd_file.write('\n')
-            scd_file.write('try {')
-            scd_file.write(f'\nBicubicResizeMT({video_width},{video_height},b=-0.5,c=0.25)\n')
-            scd_file.write('}\n')
-            scd_file.write('catch(err) {')
-            scd_file.write(f'\nBicubicResize({video_width},{video_height},b=-0.5,c=0.25)\n')
-            scd_file.write('}\n')
+            if downscale_scd > 1:
+                scd_file.write('try {')
+                scd_file.write(f'\nBicubicResizeMT((width)/{downscale_scd},(height)/{downscale_scd},b=-0.5,c=0.25)\n')
+                scd_file.write('}\n')
+                scd_file.write('catch(err) {')
+                scd_file.write(f'\nBicubicResize((width)/{downscale_scd},(height)/{downscale_scd},b=-0.5,c=0.25)\n')
+                scd_file.write('}\n')
             scd_file.write('BitsPerComponent() > 10 ? ConvertBits(10) : last')
 
     decode_command_avscd = [
@@ -267,16 +387,16 @@ def create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene
     scene_change_command = decode_command_avscd + " | " + avscd_command
     start_time = datetime.now()
     print("Detecting scene changes using av-scenechange.\n")
-    logging.info("Detecting scene changes using av-scenechange.")
+    logger.info("Detecting scene changes using av-scenechange.")
     scd_process = subprocess.Popen(scene_change_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     scd_process.communicate()
     if scd_process.returncode != 0:
-        logging.error(f"Error in scene change detection phase, return code: {scd_process.returncode}")
+        logger.error(f"Error in scene change detection phase, return code: {scd_process.returncode}")
         print("Error in scene change detection phase, return code:", scd_process.returncode)
         sys.exit(1)
     end_time = datetime.now()
     scd_time = end_time - start_time
-    logging.info(f"Scene change detection done, duration {scd_time}.")
+    logger.info(f"Scene change detection done, duration {scd_time}.")
     print("Converting logfile to QP file format.\n")
 
     with open(scene_change_csv, "r") as file:
@@ -428,7 +548,7 @@ def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_wi
         enc_process_grain = subprocess.Popen(enc_command_grain, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
         enc_process_grain.communicate()
         if enc_process_grain.returncode != 0:
-            logging.error(f"Error in FGS analysis encoder processing, return code: {enc_process_grain.returncode}")
+            logger.error(f"Error in FGS analysis encoder processing, return code: {enc_process_grain.returncode}")
             print("Error in FGS analysis encoder processing, return code:", enc_process_grain.returncode)
             sys.exit(1)
 
@@ -436,7 +556,7 @@ def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_wi
         enc_process_grain_ffmpeg = subprocess.Popen(ffmpeg_command_grain, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
         enc_process_grain_ffmpeg.communicate()
         if enc_process_grain_ffmpeg.returncode != 0:
-            logging.error(f"Error in FGS analysis lossless file processing, return code: {enc_process_grain_ffmpeg.returncode}")
+            logger.error(f"Error in FGS analysis lossless file processing, return code: {enc_process_grain_ffmpeg.returncode}")
             print("Error in FGS analysis lossless file processing, return code:", enc_process_grain_ffmpeg.returncode)
             sys.exit(1)
 
@@ -444,7 +564,7 @@ def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_wi
         enc_process_grain_grav = subprocess.Popen(grav1synth_command, shell=True)
         enc_process_grain_grav.communicate()
         if enc_process_grain_grav.returncode != 0:
-            logging.error(f"Error in grav1synth process, return code: {enc_process_grain_grav.returncode}")
+            logger.error(f"Error in grav1synth process, return code: {enc_process_grain_grav.returncode}")
             print("Error in grav1synth process, return code:", enc_process_grain_grav.returncode)
             sys.exit(1)
         sections = extract_sections(output_grain_table_baseline)
@@ -495,7 +615,7 @@ def convert_qp_to_scene_changes(encode_script):
     scene_change_file_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
 
     if scene_change_file_path is None:
-        logging.error(f"Scene change file not found: {scene_change_filename}")
+        logger.error(f"Scene change file not found: {scene_change_filename}")
         print(f"Scene change file not found: {scene_change_filename}")
         sys.exit(1)
 
@@ -567,7 +687,7 @@ def adjust_chunkdata(chunkdata_list, credits_start_frame, min_chunk_length, q, c
 
 
 def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scene_changes, video_length, credits_start_frame, min_chunk_length, q, credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script,
-                      qadjust_original_file, video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, cpu, credits_cpu):
+                      qadjust_original_file, video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, cpu, credits_cpu, qadjust_reuse):
     encode_params_original = stored_encode_params.copy()
     enc_command = []
     encode_params = []
@@ -634,11 +754,11 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
             output_chunk = os.path.join(chunks_folder, f"encoded_chunk_{i['chunk']}.hevc")
         input_files.append(output_chunk)  # Add the input file for concatenation
 
-    if qadjust_cycle != 1:
+    if qadjust_cycle != 1 and not (qadjust_cycle == -1 and qadjust_reuse):
         if rpu and encoder in ('svt', 'x265'):
             chunklist_length = len(chunklist)
             print("Splitting the RPU file based on chunks.\n")
-            logging.info("Splitting the RPU file.")
+            logger.info("Splitting the RPU file.")
             # Use ThreadPoolExecutor for multithreading
             with ThreadPoolExecutor(max_workers=int(os.cpu_count()/2)) as executor:
                 # Submit each chunk to the executor
@@ -654,7 +774,9 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
             replacements_list = {'--film-grain ': '--film-grain 0',
                                  '--preset ': f'--preset {qadjust_cpu}',
                                  '--tile-columns ': '--tile-columns 1',
-                                 '--tile-rows ': '--tile-rows 0'}
+                                 '--tile-rows ': '--tile-rows 0',
+                                 '--enable-dlf ': '--enable-dlf 2',
+                                 '--complex-hvs ': '--complex-hvs 0'}
             encode_params_original = [
                 next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
                 for x in encode_params_original
@@ -663,6 +785,11 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                 encode_params_original.append('--tile-columns 1')
             if not any('--tile-rows' in param for param in encode_params_original):
                 encode_params_original.append('--tile-rows 0')
+            if not any('--enable-dlf' in param for param in encode_params_original):
+                encode_params_original.append('--enable-dlf 2')
+            if not any('--complex-hvs' in param for param in encode_params_original):
+                encode_params_original.append('--complex-hvs 0')
+
         else:
             replacements_list = {'--preset ': '--preset fast',
                                  '--limit-refs ': '--limit-refs 3',
@@ -833,8 +960,175 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
     # for i in chunklist:
     # print(i['chunk'], i['length'], i['q'])
     if qadjust_cycle in (-1, 1):
-        logging.info(f"Total {len(chunklist)} chunks created.")
+        logger.info(f"Total {len(chunklist)} chunks created.")
     return encode_commands, input_files, chunklist, chunklist_dict, encode_params
+
+
+def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file, video_width, video_height, qadjust_b,
+                            qadjust_c, scripts_folder, decode_method, minkeyint):
+    encode_params_original = stored_encode_params.copy()
+    encode_params = []
+    probe_encode_commands = []
+    probe_chunklist = []
+
+    if encoder == 'svt':
+        replacements_list = {'--film-grain ': '--film-grain 0',
+                             '--preset ': f'--preset {qadjust_cpu}',
+                             '--tile-columns ': '--tile-columns 1',
+                             '--tile-rows ': '--tile-rows 0',
+                             '--enable-dlf ': '--enable-dlf 2',
+                             '--complex-hvs ': '--complex-hvs 0'}
+        encode_params_original = [
+            next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
+            for x in encode_params_original
+        ]
+        if not any('--tile-columns' in param for param in encode_params_original):
+            encode_params_original.append('--tile-columns 1')
+        if not any('--tile-rows' in param for param in encode_params_original):
+            encode_params_original.append('--tile-rows 0')
+        if not any('--enable-dlf' in param for param in encode_params_original):
+            encode_params_original.append('--enable-dlf 2')
+        if not any('--complex-hvs' in param for param in encode_params_original):
+            encode_params_original.append('--complex-hvs 0')
+
+    else:
+        replacements_list = {'--preset ': '--preset fast',
+                             '--limit-refs ': '--limit-refs 3',
+                             '--rdoq-level ': '--rdoq-level 2',
+                             '--rc-lookahead ': '--rc-lookahead 40',
+                             '--lookahead-slices ': '--lookahead-slices 0',
+                             '--subme ': '--subme 3',
+                             '--me ': '--me umh',
+                             '--b-adapt ': '--b-adapt 2'}
+        encode_params_original = [
+            next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
+            for x in encode_params_original
+        ]
+        if not any('--preset' in param for param in encode_params_original):
+            encode_params_original.append('--preset fast')
+        if not any('--rdoq-level' in param for param in encode_params_original):
+            encode_params_original.append('--rdoq-level 2')
+        if not any('--rc-lookahead' in param for param in encode_params_original):
+            encode_params_original.append('--rc-lookahead 40')
+        if not any('--lookahead-slices' in param for param in encode_params_original):
+            encode_params_original.append('--lookahead-slices 0')
+        if not any('--b-adapt' in param for param in encode_params_original):
+            encode_params_original.append('--b-adapt 2')
+
+    with open(encode_script, 'r') as file:
+        lines = file.readlines()
+    source = lines[0]
+    cropping = next((line for line in lines if line.strip().lower().startswith('crop(')), None)
+
+    start_frame = int(video_length * 0.05) # skipping the first 5% of the source
+    end_frame = credits_start_frame - 1 if credits_start_frame is not None else video_length - 1 # probing ends before the credits start if defined
+    trimmed_clip_length = end_frame - start_frame
+
+    if encoder == 'svt':
+        probe_length = max(2 * minkeyint, 128)
+    else:
+        probe_length = 128
+    probe_ratio = 0.05  # size of total sample (1 = full length)
+    step = int(round(probe_length / probe_ratio)) # how many frames between samples
+    samples = (trimmed_clip_length + step - 1) // step # number of sample chunks
+    probe_clip_length = probe_length * samples # length of the probe clip
+
+    chunk_number = 1
+    i = 0
+
+    while True:
+        start = i * probe_length
+        end = start + (probe_length - 1)
+
+        if start >= probe_clip_length:
+            break
+
+        probe_chunklist.append({
+            'chunk': chunk_number,
+            'length': probe_length,
+            'start': start,
+            'end': end,
+            'credits': 0,
+            'q': 0
+        })
+
+        chunk_number += 1
+        i += 1
+
+    qadjust_original_file = qadjust_original_file.replace(".avs", "_probe.avs")
+    with open(qadjust_original_file, "w") as qadjust_script:
+        qadjust_script.write(source)
+        qadjust_script.write(f'\nTrim({start_frame}, {end_frame})\n')
+        qadjust_script.write(f'SelectRangeEvery({step}, {probe_length})\n')
+        if cropping:
+            qadjust_script.write(cropping)
+            qadjust_script.write('\n')
+        qadjust_script.write('try {\n')
+        qadjust_script.write(f'BicubicResizeMT({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
+        qadjust_script.write('}\n')
+        qadjust_script.write('catch(err) {\n')
+        qadjust_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
+        qadjust_script.write('}\n')
+        qadjust_script.write('ConvertBits(10)')
+
+    # print(probe_chunklist)
+    for i in probe_chunklist:
+        encode_params = copy.deepcopy(encode_params_original)
+        if encoder in ('svt', 'x265'):
+            encode_params.append(f'--crf {i['q']}')
+        scene_script_file = os.path.join(scripts_folder, f"scene_probe_{i['chunk']}.avs")
+        if encoder != 'x265':
+            output_chunk = os.path.join(chunks_folder, f"encoded_chunk_probe_{i['chunk']}.ivf")
+        else:
+            output_chunk = os.path.join(chunks_folder, f"encoded_chunk_probe_{i['chunk']}.hevc")
+        # Create the Avisynth script for this scene
+        with open(scene_script_file, 'w') as scene_script:
+            # scene_script.write(source)
+            scene_script.write(f'Import("qadjust_original_probe.avs")\n')
+            scene_script.write(f"Trim({i['start']}, {i['end']})\n")
+
+        if decode_method == 0:
+            decode_command = [
+                "avs2yuv64.exe",
+                "-no-mt",
+                '"'+scene_script_file+'"',  # Use the Avisynth script for this scene
+                "-"
+            ]
+        else:
+            decode_command = [
+                "ffmpeg.exe",
+                "-loglevel", "fatal",
+                "-i", '"'+scene_script_file+'"',
+                "-f", "yuv4mpegpipe",
+                "-strict", "-1",
+                "-"
+            ]
+
+        if encoder == 'svt':
+            enc_command = [
+                "svtav1encapp.exe",
+                *encode_params,
+                "-b", '"'+output_chunk+'"',
+                "-i -"
+            ]
+        else:
+            enc_command = [
+                "x265.exe",
+                "--y4m",
+                "--no-progress",
+                f'--frames {i['length']}',
+                *encode_params,
+                "--output", '"'+output_chunk+'"',
+                "--input", "-"
+            ]
+
+        probe_encode_commands.append((decode_command, enc_command, output_chunk))
+    # print (encode_commands)
+    probe_chunklist_dict = {chunk_dict['chunk']: chunk_dict['length'] for chunk_dict in probe_chunklist}
+    # for i in chunklist:
+    # print(i['chunk'], i['length'], i['q'])
+    logger.info(f"Total {len(probe_chunklist)} chunks created.")
+    return probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params
 
 
 def process_rpu(i, chunklist_length, video_length, scripts_folder, chunks_folder, rpu):
@@ -872,7 +1166,7 @@ def process_rpu(i, chunklist_length, video_length, scripts_folder, chunks_folder
     dovitool_process = subprocess.Popen(dovitool_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     dovitool_process.communicate()
     if dovitool_process.returncode != 0:
-        logging.error(f"Error in RPU processing, return code {dovitool_process.returncode}")
+        logger.error(f"Error in RPU processing, return code {dovitool_process.returncode}")
         print("Error in RPU processing, return code:", dovitool_process.returncode)
         sys.exit(1)
 
@@ -931,7 +1225,7 @@ def run_encode_command(command):
     enc_command = " ".join(enc_command)
 
     enc_command = avs2yuv_command + ' | ' + enc_command
-    # logging.info(f"Launching encoding command {enc_command}")
+    # logger.info(f"Launching encoding command {enc_command}")
 
     # Print the encoding command for debugging
     # print(f"\nEncoder command: {enc_command}")
@@ -953,15 +1247,15 @@ def run_encode_command(command):
             if enc_process.returncode == 0:
                 return output_chunk
             else:
-                logging.warning(f"Error in encoder processing, chunk {output_chunk}, attempt {attempt}.")
-                logging.warning(f"Return code: {enc_process.returncode}")
+                logger.warning(f"Error in encoder processing, chunk {output_chunk}, attempt {attempt}.")
+                logger.warning(f"Return code: {enc_process.returncode}")
                 print(f"\nError in encoder processing, chunk {output_chunk}, attempt {attempt}.\n")
                 print("Return code:", enc_process.returncode)
         except Exception as e:
-            logging.error(f"Exception while encoding chunk {output_chunk}: {e}")
+            logger.error(f"Exception while encoding chunk {output_chunk}: {e}")
 
-    logging.error(f"Max retries reached, unable to encode chunk {output_chunk}.")
-    logging.error(f"The encoder command line is: {enc_command}.")
+    logger.error(f"Max retries reached, unable to encode chunk {output_chunk}.")
+    logger.error(f"The encoder command line is: {enc_command}.")
     print("Max retries reached, unable to encode chunk", output_chunk)
     print("The encoder command line is:", enc_command)
     return None
@@ -1007,7 +1301,7 @@ def encode_sample(output_folder, encode_script, encode_params, rpu, encoder, sam
         dovitool_process = subprocess.Popen(dovitool_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
         dovitool_process.communicate()
         if dovitool_process.returncode != 0:
-            logging.error(f"Error in RPU processing, return code: {dovitool_process.returncode}")
+            logger.error(f"Error in RPU processing, return code: {dovitool_process.returncode}")
             print("Error in RPU processing, return code:", dovitool_process.returncode)
             sys.exit(1)
 
@@ -1085,24 +1379,24 @@ def encode_sample(output_folder, encode_script, encode_params, rpu, encoder, sam
     enc_command_sample = decode_command_sample + ' | ' + enc_command_sample
 
     print("Encoding the sample file.\n")
-    logging.info("Encoding the sample file.")
+    logger.info("Encoding the sample file.")
 
     enc_process_sample = subprocess.Popen(enc_command_sample, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     enc_process_sample.communicate()
     if enc_process_sample.returncode != 0:
-        logging.error(f"Error in sample encode processing, return code: {enc_process_sample.returncode}.")
+        logger.error(f"Error in sample encode processing, return code: {enc_process_sample.returncode}.")
         print("Error in sample encode processing, return code:", enc_process_sample.returncode)
         sys.exit(1)
 
     end_time = datetime.now()
     sample_time = end_time - start_time
-    logging.info(f"Path to the sample is: {output_chunk}. Encode duration {sample_time}.")
+    logger.info(f"Path to the sample is: {output_chunk}. Encode duration {sample_time}.")
     print("Path to the sample is:", output_chunk)
     if rpu and encoder in ('svt', 'x265'):
         print("Please note that to ensure Dolby Vision mode during playback, it is recommended to mux the file using mkvmerge/MKVToolnix GUI.")
 
 
-def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder):
+def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder, video_matrix, video_transfer, video_primaries, chroma_location, master_display, max_cll):
     # concat_command = []
     # Create a list file for input files
     input_list_txt = os.path.join(chunks_folder, "input_list.txt")
@@ -1120,18 +1414,61 @@ def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, enco
         mkvmerge_json_file = os.path.join(chunks_folder, "input_list.json")
         with open(input_list_txt, "r") as input_file:
             files = [line.strip() for line in input_file]
+
+        max_content_light = None
+        max_frame_light = None
+        chromaticity_coordinates = None
+        white_color_coordinates = None
+        max_luminance = None
+        min_luminance = None
+
+        if master_display:
+            r = re.search(r"R\(([^)]+)\)", master_display).group(1)
+            g = re.search(r"G\(([^)]+)\)", master_display).group(1)
+            b = re.search(r"B\(([^)]+)\)", master_display).group(1)
+            l = re.search(r"L\(([^)]+)\)", master_display).group(1)
+            chromaticity_coordinates = ",".join([r, g, b])
+            white_color_coordinates = re.search(r"WP\(([^)]+)\)", master_display).group(1)
+            max_luminance, min_luminance = l.split(",")
+        if max_cll:
+            max_content_light, max_frame_light = max_cll.split(",")
+            if max_content_light == 0 and max_frame_light == 0:
+                max_content_light = None
+                max_frame_light = None
+
+        color_matrix_coefficients = str(video_matrix)
+        color_transfer_characteristics = str(video_transfer)
+        color_primaries = str(video_primaries)
+        if chroma_location == 0:
+            chroma_siting = "0,0"
+        else:
+            chroma_siting = "1,1"
+
+        metadata = {
+            "--color-matrix-coefficients": "0:" + color_matrix_coefficients,
+            "--chroma-siting": "0:" + chroma_siting,
+            "--color-transfer-characteristics": "0:" + color_transfer_characteristics,
+            "--color-primaries": "0:" + color_primaries,
+            "--max-content-light": "0:" + str(max_content_light),
+            "--max-frame-light": "0:" + str(max_frame_light),
+            "--chromaticity-coordinates": "0:" + str(chromaticity_coordinates),
+            "--white-color-coordinates": "0:" + str(white_color_coordinates),
+            "--max-luminance": "0:" + str(max_luminance),
+            "--min-luminance": "0:" + str(min_luminance)
+        }
+
         mkvmerge_json = [
-            "--ui-language",
-            "en",
-            "--output",
-            output_final,
-            "--language",
-            "0:und",
-            "--compression",
-            "0:none"
+            "--ui-language", "en",
+            "--output", output_final,
+            "--language", "0:und",
+            "--compression", "0:none"
         ]
 
         for file in files:
+            # Add only those metadata options that have non-empty values
+            for key, value in metadata.items():
+                if value not in (None, "0:None", ""):
+                    mkvmerge_json.extend([key, str(value)])
             mkvmerge_json.extend(["(", file, ")", "+"])
         mkvmerge_json.pop()  # Remove the trailing "+"
         mkvmerge_json.extend([
@@ -1148,7 +1485,7 @@ def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, enco
             f"@{mkvmerge_json_file}"
         ]
 
-        logging.info("Concatenating using mkvmerge.")
+        logger.info("Concatenating using mkvmerge.")
         print("Concatenating chunks using mkvmerge.\n")
 
     else:
@@ -1186,17 +1523,17 @@ def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, enco
         # print("Concatenation Command (ffmpeg):")
         # print(" ".join(ffmpeg_concat_command))
 
-        logging.info("Concatenating using ffmpeg.")
+        logger.info("Concatenating using ffmpeg.")
         print("Concatenating chunks using ffmpeg.\n")
 
     concat_process = subprocess.Popen(concat_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     concat_process.communicate()
     if concat_process.returncode != 0:
-        logging.error(f"Error when concatenating, return code: {concat_process.returncode}")
+        logger.error(f"Error when concatenating, return code: {concat_process.returncode}")
         print("Error when concatenating, return code:", concat_process.returncode)
         sys.exit(1)
 
-    logging.info(f"Concatenated video saved as {output_final}.")
+    logger.info(f"Concatenated video saved as {output_final}.")
     print(f"Concatenated video saved as {output_final}.")
 
 
@@ -1207,22 +1544,26 @@ def read_presets(presets, encoder):
     try:
         config.read(presetpath)
     except Exception as e:
-        logging.error(f"Presets.ini could not be found from the script directory. Exception code {e}")
+        logger.error(f"Presets.ini could not be found from the script directory. Exception code {e}")
         print("\nPresets.ini could not be found from the script directory, exiting..\n")
         sys.exit(1)
     default_section = encoder + '-default'
     try:
         default_params = dict(config.items(default_section))
     except Exception as e:
-        logging.warning(f"The default settings for the encoder could not be found from presets.ini. Exception code {e}")
+        logger.warning(f"The default settings for the encoder could not be found from presets.ini. Exception code {e}")
         print("\nWarning: the default settings for the encoder could not be found from presets.ini.\n")
         default_params = {}
     try:
         base_working_folder = config['paths']['base_working_folder']
     except Exception as e:
-        logging.warning(f"The path for base working folder is missing from presets.ini. Exception code {e}")
+        logger.warning(f"The path for base working folder is missing from presets.ini. Exception code {e}")
         print("The path for base working folder is missing from presets.ini.\n")
         base_working_folder = input("Please enter a path: ")
+    try:
+        preset_config_json = config['paths']['model_config_json']
+    except:
+        preset_config_json = ''
 
     merged_params = {}
     for preset in presets:
@@ -1231,11 +1572,11 @@ def read_presets(presets, encoder):
             preset_params = dict(config.items(preset_section))
             merged_params.update(preset_params)
         except Exception as e:
-            logging.error(f"Chosen preset not found from the presets.ini file. Exception code {e}")
+            logger.error(f"Chosen preset not found from the presets.ini file. Exception code {e}")
             print("\nChosen preset not found from the presets.ini file.\n")
             sys.exit(1)
 
-    return default_params, merged_params, base_working_folder
+    return default_params, merged_params, base_working_folder, preset_config_json
 
 
 def calculate_ssimu2_stats(score_list: list[int]):
@@ -1279,14 +1620,14 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
                 avg_bitrate = total_filesize_kbits / processed_length
                 encoded_chunks += 1
                 if qadjust_cycle != 3:
-                    logging.info(f"Chunk {chunk_number} finished, length {round(chunk_length, 2)}s, average bitrate {chunk_avg_bitrate} kbps.")
+                    logger.info(f"Chunk {chunk_number} finished, length {round(chunk_length, 2)}s, average bitrate {chunk_avg_bitrate} kbps.")
                 progress_bar.update(chunklist_dict.get(chunk_number))
                 progress_bar.set_postfix({'Chunks': f'{encoded_chunks}/{chunks}', 'Rate': f'{avg_bitrate:.2f} kbps', 'Est. size': f'{(video_length/fr)*avg_bitrate/8/1024:.2f} MB'})
                 completed_chunks.append(output_chunk)
                 # print(f"Encoding for scene completed: {output_chunk}")
         except KeyboardInterrupt:
             print("\nEncoding interrupted by user. Terminating all subprocesses...")
-            logging.warning("Encoding interrupted by user.")
+            logger.warning("Encoding interrupted by user.")
             interrupted = True
             progress_bar.close()
             terminate_all_processes()
@@ -1294,8 +1635,8 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
             return
         except Exception as e:
             interrupted = True
-            logging.error("Something went wrong while encoding, please restart!")
-            logging.error(f"Exception: {e}")
+            logger.error("Something went wrong while encoding, please restart!")
+            logger.error(f"Exception: {e}")
             print("Something went wrong while encoding, please restart!\n")
             print("Exception:", e)
             terminate_all_processes()
@@ -1308,28 +1649,33 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
     encoding_time = end_time - start_time
     if qadjust_cycle not in (1, 2) or reuse_qadjust:
         print("Finished encoding the chunks.\n")
-        logging.info(f"Final encode finished, average bitrate {avg_bitrate:.2f} kbps.")
+        logger.info(f"Final encode finished, average bitrate {avg_bitrate:.2f} kbps.")
     else:
         print("Finished encoding the Q analysis chunks.\n")
-        logging.info(f"Q analysis encode finished, average bitrate {avg_bitrate:.2f} kbps.")
-    logging.info(f"Total encoding time {encoding_time}.")
+        logger.info(f"Q analysis encode finished, average bitrate {avg_bitrate:.2f} kbps.")
+    logger.info(f"Total encoding time {encoding_time}.")
 
 
-def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, maxdecoders, butter_target, phase):
+def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, qadjust_target, phase, video_matrix, video_transfer, video_primaries, chroma_location):
     import vapoursynth as vs
 
     core = vs.core
-    core.max_cache_size = 4096
+    core.max_cache_size = 2048
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
-    cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=False, maxdecoders=maxdecoders)
+    cut_encoded_clip = core.lsmas.LWLibavSource(source=f"{name}{chunk['chunk']}{ext}", cache=0)
 
     if skip != 1:
         cut_source_clip = cut_source_clip.std.SelectEvery(cycle=skip, offsets=0)
         cut_encoded_clip = cut_encoded_clip.std.SelectEvery(cycle=skip, offsets=0)
 
-    result = core.vship.BUTTERAUGLI(cut_source_clip, cut_encoded_clip, numStream=qadjust_threads)
+    # Let's ensure Vship gets the properties of the clips
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Matrix=video_matrix)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Transfer=video_transfer)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Primaries=video_primaries)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _ChromaLocation=chroma_location)
 
+    result = core.vship.BUTTERAUGLI(cut_source_clip, cut_encoded_clip, numStream=qadjust_threads)
     chunk_scores = []
     for frame in result.frames():
         score = frame.props['_BUTTERAUGLI_3Norm']
@@ -1338,15 +1684,12 @@ def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qad
     chunk_scores = [s for s in chunk_scores if s > 0]
 
     if not chunk_scores:
-        # print(f"Chunk {chunk['chunk']} has only zero-score (black) frames!")
-        # logging.info(f"Chunk {chunk['chunk']} has only zero-score (black) frames!")
         average = 0.0
     else:
-        # average = np.mean(chunk_scores)
         average = np.mean(np.power(chunk_scores, 3)) ** (1 / 3)
 
     if phase == 'butter_pass1':
-        if average < butter_target:
+        if average < qadjust_target:
             butter_pass2_crf = 33.0
         else:
             butter_pass2_crf = 10.5
@@ -1355,13 +1698,13 @@ def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qad
         return chunk['chunk'], average, chunk_scores
 
 
-def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_matrix, metrics_plugin, qadjust_threads, maxdecoders):
+def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, metrics_plugin, qadjust_threads):
     import vapoursynth as vs
     core = vs.core
-    core.max_cache_size = 4096
+    core.max_cache_size = 2048
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
-    cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=False, maxdecoders=maxdecoders)
+    cut_encoded_clip = core.lsmas.LWLibavSource(source=f"{name}{chunk['chunk']}{ext}", cache=0)
 
     if metrics_plugin == 3:
         cut_source_clip = cut_source_clip.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix).fmtc.transfer(transs="srgb", transd="linear", bits=32)
@@ -1370,14 +1713,22 @@ def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_ma
         cut_source_clip = cut_source_clip.std.SelectEvery(cycle=skip, offsets=0)
         cut_encoded_clip = cut_encoded_clip.std.SelectEvery(cycle=skip, offsets=0)
 
+    # Let's ensure Vship gets the properties of the clips
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Matrix=video_matrix)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Transfer=video_transfer)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Primaries=video_primaries)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _ChromaLocation=chroma_location)
+
     if metrics_plugin == 1:
         result = core.vship.SSIMULACRA2(cut_source_clip, cut_encoded_clip, numStream=qadjust_threads)
+        scores = [frame.props['_SSIMULACRA2'] for frame in result.frames()]
     elif metrics_plugin == 2:
-        result = core.vszip.Metrics(cut_source_clip, cut_encoded_clip, mode=0)
+        result = core.vszip.SSIMULACRA2(cut_source_clip, cut_encoded_clip)
+        scores = [frame.props['SSIMULACRA2'] for frame in result.frames()]
     else:
         result = cut_source_clip.ssimulacra2.SSIMULACRA2(cut_encoded_clip)
+        scores = [frame.props['SSIMULACRA2'] for frame in result.frames()]
 
-    scores = [frame.props['_SSIMULACRA2'] for frame in result.frames()]
     filtered = [s for s in scores if s >= 0]
     avg = float(np.mean(filtered))
     p5 = float(np.percentile(filtered, 5))
@@ -1385,11 +1736,54 @@ def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_ma
     return chunk['chunk'], avg, scores, p5
 
 
+def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, phase, cvvdp_model, cvvdp_config):
+    import vapoursynth as vs
+    core = vs.core
+    core.max_cache_size = 2048
+
+    cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
+    cut_encoded_clip = core.lsmas.LWLibavSource(source=f"{name}{chunk['chunk']}{ext}", cache=0)
+    if skip != 1:
+        cut_source_clip = cut_source_clip.std.SelectEvery(cycle=skip, offsets=0)
+        cut_encoded_clip = cut_encoded_clip.std.SelectEvery(cycle=skip, offsets=0)
+
+    # Let's ensure Vship gets the properties of the clips
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Matrix=video_matrix)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Transfer=video_transfer)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Primaries=video_primaries)
+    cut_source_clip = core.std.SetFrameProps(cut_source_clip, _ChromaLocation=chroma_location)
+
+    if video_transfer == 'smpte2084':
+        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, resizeToDisplay=1, model_config_json=cvvdp_config)
+    else:
+        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, resizeToDisplay=1, model_config_json=cvvdp_config)
+
+    frames = cut_source_clip.num_frames
+    score = [frame.props['_CVVDP'] for frame in result.frames()]
+
+    if phase != 'cvvdp_probing':
+        luma_clip = cut_source_clip.std.ShufflePlanes(planes=0, colorfamily=vs.GRAY)
+        stats_clip = luma_clip.std.PlaneStats()
+
+        luma_sum = 0.0
+        luma_frames = stats_clip.num_frames
+
+        for f in stats_clip.frames():
+            luma_sum += f.props['PlaneStatsAverage']
+
+        average_luma = luma_sum / luma_frames
+    else:
+        average_luma = 0.0
+
+    return chunk['chunk'], score[-1], score[-1] * frames, frames, average_luma, average_luma * frames
+
+
 # noinspection PyTypeChecker,PyUnboundLocalVariable
-def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target, avg_bitrate, avg_bitrate_qadjust_pass1,
-                      phase, video_height, min_chunk_length, minkeyint):
+def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu,
+                      cpu, qadjust_target, avg_bitrate, avg_bitrate_qadjust_pass1, phase, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config):
     global butter_scores_pass1
     global butter_scores_pass2
+    global chunk_cvvdp_scores
     global average_qadjust_pass1
     global metrics_plugin
 
@@ -1412,34 +1806,29 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             qadjust_mode = 1
         else:
             print("Unable to find a Vapoursynth module to do the metrics calculation, exiting.")
-            logging.error("Unable to find a Vapoursynth module to do the metrics calculation, exiting.")
+            logger.error("Unable to find a Vapoursynth module to do the metrics calculation, exiting.")
             sys.exit(1)
 
     name, ext = os.path.splitext(output_final_metrics)
-    if phase != 'butter_pass2':
+    if phase not in ('butter_pass2', 'cvvdp_probing'):
         source_length = sum(chunk['length'] for chunk in chunklist)
         analysis_length = sum(chunk['length'] for chunk in chunklist if chunk['credits'] == 0)
         print(f"Original: {source_length} frames, including credits")
         print(f"Analysis pass encode: {analysis_length} frames, credits ignored")
 
     print(f"Calculating the metrics using skip value {skip}.\n")
-    logging.info(f"Calculating the metrics using skip value {skip}.")
+    logger.info(f"Calculating the metrics using skip value {skip}.")
     start_time = datetime.now()
-
-    if video_height > 1080:
-        maxdecoders = 2
-    else:
-        maxdecoders = 4
 
     # SSIMU2
     if qadjust_mode == 1:
-        tasks = [(chunk, name, ext, qadjust_original_file, skip, video_matrix, metrics_plugin, qadjust_threads, maxdecoders)
+        tasks = [(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, metrics_plugin, qadjust_threads)
                  for chunk in chunklist if chunk['credits'] == 0]
 
         total_metric_scores = []
         percentile_5_total = [0] * len(chunklist)
 
-        with ProcessPoolExecutor(max_workers=qadjust_workers) as executor:
+        with ProcessPoolExecutor(max_workers=qadjust_workers, initializer=silence_worker) as executor:
             futures = [executor.submit(analyze_ssimu2_chunk_wrapper, task) for task in tasks]
             results = []
             with tqdm(total=len(futures), desc="Progress", unit="chunk(s)", smoothing=0) as pbar:
@@ -1458,16 +1847,18 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
                     break
 
         # Final stats
-        average = float(np.mean(total_metric_scores))
+        # average = float(np.mean(total_metric_scores))
+        total_metric_scores = np.array(total_metric_scores)
+        average = len(total_metric_scores) / np.sum(1.0 / total_metric_scores)
         print(f'SSIMU2 harmonic mean:  {average:.5f}')
-        logging.info(f"SSIMU2 harmonic mean: {average:.5f}")
+        logger.info(f"SSIMU2 harmonic mean: {average:.5f}")
     # BUTTERAUGLI
-    else:
+    elif qadjust_mode == 2:
         if phase == 'butter_pass1':
             print(f"Butteraugli at CRF 24.0:")
-            tasks = [(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, maxdecoders, butter_target, phase)
+            tasks = [(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, qadjust_target, phase, video_matrix, video_transfer, video_primaries, chroma_location)
                      for chunk in chunklist if chunk['credits'] == 0]
-            with ProcessPoolExecutor(max_workers=qadjust_workers) as executor:
+            with ProcessPoolExecutor(max_workers=qadjust_workers, initializer=silence_worker) as executor:
                 futures = [executor.submit(analyze_butteraugli_chunk_wrapper, task) for task in tasks]
                 results = []
                 with tqdm(total=len(futures), desc="Progress", unit="chunk(s)", smoothing=0) as progress_bar:
@@ -1483,7 +1874,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             if zero_score_chunks:
                 print("Chunks with only zero-score (black) frames:", ", ".join(map(str, zero_score_chunks)))
                 for zc in zero_score_chunks:
-                    logging.info(f"Chunk {zc} has only zero-score (black) frames!")
+                    logger.info(f"Chunk {zc} has only zero-score (black) frames!")
 
             # Sort by chunk number to match original list
             results.sort(key=lambda x: x[0])
@@ -1495,13 +1886,13 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             # average_qadjust_pass1 = len(all_scores) / np.sum(1.0 / (np.array(all_scores)))
             average_qadjust_pass1 = np.mean(np.power(all_scores, 3)) ** (1 / 3)
             print(f'Root mean cube score across all analyzed frames, CRF 24.0:  {average_qadjust_pass1:.5f}\n')
-            logging.info(f"Butteraugli CRF 24.0 pass root mean cube score across all analyzed frames: {average_qadjust_pass1:.5f}")
+            logger.info(f"Butteraugli CRF 24.0 pass root mean cube score across all analyzed frames: {average_qadjust_pass1:.5f}")
 
         else:
             print(f"Butteraugli pass 2:")
-            tasks = [(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, maxdecoders, butter_target, phase)
+            tasks = [(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, qadjust_target, phase, video_matrix, video_transfer, video_primaries, chroma_location)
                      for chunk in chunklist if chunk['credits'] == 0]
-            with ProcessPoolExecutor(max_workers=qadjust_workers) as executor:
+            with ProcessPoolExecutor(max_workers=qadjust_workers, initializer=silence_worker) as executor:
                 futures = [executor.submit(analyze_butteraugli_chunk_wrapper, task) for task in tasks]
                 results = []
                 with tqdm(total=len(futures), desc="Progress", unit="chunk(s)", smoothing=0) as progress_bar:
@@ -1513,7 +1904,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             if zero_score_chunks:
                 print("Chunks with only zero-score (black) frames:", ", ".join(map(str, zero_score_chunks)))
                 for zc in zero_score_chunks:
-                    logging.info(f"Chunk {zc} has only zero-score (black) frames!")
+                    logger.info(f"Chunk {zc} has only zero-score (black) frames!")
 
             butter_scores_pass2.clear()
             all_scores = []
@@ -1523,6 +1914,54 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             for chunk_number, rmc, scores in results:
                 butter_scores_pass2.append(rmc)
                 all_scores.extend(scores)
+    # CVVDP
+    else:
+        if phase == 'cvvdp_probing':
+            qadjust_original_file = qadjust_original_file.replace(".avs", "_probe.avs")
+        tasks = [(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, phase, cvvdp_model, cvvdp_config)
+                 for chunk in chunklist if chunk['credits'] == 0]
+
+        total_metric_scores = []
+        total_weight = 0.0
+        total_weight_luma = 0.0
+        weighted_frames = 0
+
+        with ProcessPoolExecutor(max_workers=qadjust_workers, initializer=silence_worker) as executor:
+            futures = [executor.submit(analyze_cvvdp_chunk_wrapper, task) for task in tasks]
+            results = []
+            with tqdm(total=len(futures), desc="Progress", unit="chunk(s)", smoothing=0) as pbar:
+                for future in as_completed(futures):
+                    results.append(future.result())
+                    pbar.update(1)
+
+        results.sort(key=lambda x: x[0])  # Sort by chunk_number
+
+        for chunk_number, score, weight, frames, average_luma, weighted_average_luma in results:
+            total_metric_scores.append(score)
+            total_weight += weight
+            total_weight_luma += weighted_average_luma
+            weighted_frames += frames
+
+            chunk_cvvdp_scores.append({
+                'chunk': chunk_number,
+                'score': score,
+                'average_luma': average_luma,
+            })
+
+        # Final stats
+        # average = float(np.mean(total_metric_scores))
+        total_metric_scores = np.array(total_metric_scores)
+        average = len(total_metric_scores) / np.sum(1.0 / total_metric_scores)
+        weighted_average = total_weight / weighted_frames
+
+        if phase == 'cvvdp_probing':
+            print(f'CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}')
+            logger.info(f"CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}")
+            return weighted_average
+        else:
+            weighted_average_luma = total_weight_luma / weighted_frames
+            print(f'CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.5f}')
+            logger.info(f"CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.5f}")
 
     if qadjust_mode == 1:
         qadjust_data = {
@@ -1536,15 +1975,31 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
     elif phase == 'butter_pass2':
         qadjust_data = {
             "qadjust_cpu": qadjust_cpu,
-            "butter_target": butter_target,
+            "butteraugli_target": qadjust_target,
             "avg_bitrate_qadjust_pass1": avg_bitrate_qadjust_pass1,
             "butteraugli_score_pass1": average_qadjust_pass1,
             "min_chunk_length": min_chunk_length,
             "min_keyint": minkeyint,
             "chunks": []
         }
+    elif phase == 'cvvdp':
+        qadjust_data = {
+            "cvvdp": {
+                "curve": cvvdp_curve
+            },
+            "qadjust_cpu": qadjust_cpu,
+            "analysis_q": cvvdp_q,
+            "target": qadjust_target,
+            "cvvdp_weighted_score": weighted_average,
+            "average_weighted_luma": weighted_average_luma,
+            "cvvdp_q_scaling_min_luma": cvvdp_min_luma,
+            "cvvdp_q_scaling_max_luma": cvvdp_max_luma,
+            "min_chunk_length": min_chunk_length,
+            "min_keyint": minkeyint,
+            "chunks": []
+        }
 
-    chunklist = sorted(chunklist, key=lambda x: x['chunk'], reverse=False)
+    chunklist = sorted(chunklist, key=lambda x: x['chunk'], reverse=False) # order chunklist by chunk number
 
     if qadjust_mode == 1:
         for i in range(len(chunklist)):
@@ -1584,8 +2039,8 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             if chunklist[i]['credits'] == 1:
                 continue
             chunklist[i]['q'] = butter_pass2_crfs[i]
-    else:
-        new_crfs = adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, butter_target, qadjust_cpu, cpu, q, chunklist)
+    elif qadjust_mode == 2:
+        new_crfs = adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_target, qadjust_cpu, cpu, q, chunklist)
         for i in range(len(chunklist)):
             if chunklist[i]['credits'] == 1:
                 continue
@@ -1613,6 +2068,50 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "weighted_crf": weighted_crf,
             "chunks": qadjust_data["chunks"]
         }
+    elif qadjust_mode == 3:
+        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q)
+        new_crf_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
+        score_by_chunk = {row['chunk']: row['score'] for row in chunk_cvvdp_scores}
+        luma_by_chunk= {row['chunk']: row['average_luma'] for row in chunk_cvvdp_scores}
+        qadjust_data["chunks"] = []
+
+        for chunk in chunklist:
+            if chunk['credits'] == 1:
+                continue
+
+            chunk_number = chunk['chunk']
+            new_q = new_crf_by_chunk[chunk_number]
+            chunk_score = float(score_by_chunk[chunk_number])
+            average_luma = float(luma_by_chunk[chunk_number])
+
+            qadjust_data["chunks"].append({
+                "chunk_number": chunk_number,
+                "length": chunk['length'],
+                "cvvdp_score": chunk_score,
+                "average_luma": average_luma,
+                "adjusted_Q": new_q
+            })
+
+            # Update the chunk itself
+            chunk['q'] = new_q
+
+        total_length = 0
+        weighted_sum = 0
+        for chunk in chunklist:
+            if chunk['credits'] == 1:
+                continue
+            length = chunk['length']
+            weighted_sum += chunk['q'] * length
+            total_length += length
+
+        weighted_crf = round(weighted_sum / total_length, 2)
+
+        qadjust_data = {
+            **{k: v for k, v in qadjust_data.items() if k != "chunks"},
+            "weighted_crf": weighted_crf,
+            "chunks": qadjust_data["chunks"]
+        }
+        # sys.exit(0)
 
     chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
 
@@ -1621,7 +2120,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             json.dump(qadjust_data, results_file, indent=4)
         end_time = datetime.now()
         metrics_time = end_time - start_time
-        logging.info(f"Metrics calculation finished, duration {metrics_time}.")
+        logger.info(f"Metrics calculation finished, duration {metrics_time}.")
         show_qs(chunklist, False)
         return chunklist
     else:
@@ -1646,12 +2145,10 @@ def calculate_svt_keyint(video_framerate, target_keyint_seconds, startup_mg_size
         num_regular_mgs = math.ceil(remaining / regular_mg_size)
         aligned_keyint = startup_mg_size + num_regular_mgs * regular_mg_size
 
-    aligned_keyint += 1
-
     return aligned_keyint
 
 
-def linear_butter(score_pass1, score_pass2, qstep_pass1, qstep_pass2, butter_target, qadjust_cpu, cpu, min_crf, max_crf):
+def linear_butter(score_pass1, score_pass2, qstep_pass1, qstep_pass2, qadjust_target, qadjust_cpu, cpu, min_crf, max_crf):
     dc = np.array([4, 9, 10, 13, 15, 17, 20, 22, 25, 28, 31, 34, 37, 40, 43, 47, 50, 53, 57, 60, 64, 68, 71, 75, 78, 82, 86, 90, 93, 97, 101, 105, 109, 113, 116, 120, 124, 128, 132, 136, 140, 143, 147, 151, 155, 159, 163, 166, 170, 174, 178, 182,
                     185, 189, 193, 197, 200, 204, 208, 212, 215, 219, 223, 226, 230, 233, 237, 241, 244, 248, 251, 255, 259, 262, 266, 269, 273, 276, 280, 283, 287, 290, 293, 297, 300, 304, 307, 310, 314, 317, 321, 324, 327, 331, 334, 337, 343, 350,
                     356, 362, 369, 375, 381, 387, 394, 400, 406, 412, 418, 424, 430, 436, 442, 448, 454, 460, 466, 472, 478, 484, 490, 499, 507, 516, 525, 533, 542, 550, 559, 567, 576, 584, 592, 601, 609, 617, 625, 634, 644, 655, 666, 676, 687, 698,
@@ -1660,7 +2157,7 @@ def linear_butter(score_pass1, score_pass2, qstep_pass1, qstep_pass2, butter_tar
                     2236, 2276, 2319, 2363, 2410, 2458, 2508, 2561, 2616, 2675, 2737, 2802, 2871, 2944, 3020, 3102, 3188, 3280, 3375, 3478, 3586, 3702, 3823, 3953, 4089, 4236, 4394, 4559, 4737, 4929, 5130, 5347])
     dc_x = np.arange(dc.shape[0])
     fit = np.polynomial.Polynomial.fit([score_pass1, score_pass2], [qstep_pass1, qstep_pass2], 1)
-    qstep = fit(butter_target)
+    qstep = fit(qadjust_target)
 
     # Apply correction for high qstep
     if qstep > 163:
@@ -1688,7 +2185,7 @@ def linear_butter(score_pass1, score_pass2, qstep_pass1, qstep_pass2, butter_tar
     return crf
 
 
-def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, butter_target, qadjust_cpu, cpu, q, chunklist):
+def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_target, qadjust_cpu, cpu, q, chunklist):
     crfs = []
     for i in range(len(chunklist)):
         if chunklist[i]['credits'] == 1:
@@ -1697,15 +2194,67 @@ def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, butter_targ
             crf = q
             crfs.append(crf)
             print(f"Fallback CRF {q} used for chunk {chunklist[i]['chunk']}")
-            logging.info(f"Fallback CRF {q} used for chunk {chunklist[i]['chunk']}")
+            logger.info(f"Fallback CRF {q} used for chunk {chunklist[i]['chunk']}")
             continue
         if chunklist[i]['q'] > 24.0:
             qstep_pass1, qstep_pass2 = 343, 592
         else:
             qstep_pass1, qstep_pass2 = 343, 155
-        crf = linear_butter(butter_scores_pass1[i], butter_scores_pass2[i], qstep_pass1, qstep_pass2, butter_target, qadjust_cpu, cpu, 10.0, 50.0)
+        crf = linear_butter(butter_scores_pass1[i], butter_scores_pass2[i], qstep_pass1, qstep_pass2, qadjust_target, qadjust_cpu, cpu, 10.0, 50.0)
         crfs.append(crf)
     return crfs
+
+
+def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q):
+    # --- sort probe curve by Q ---
+    cvvdp_curve = sorted(cvvdp_curve, key=lambda x: x['q'])
+
+    # --- estimate local slope around cvvdp_q ---
+    for a, b in zip(cvvdp_curve, cvvdp_curve[1:]):
+        if a['q'] <= cvvdp_q <= b['q']:
+            slope = (b['score'] - a['score']) / (b['q'] - a['q'])
+            break
+    else:
+        # fallback (edge of curve)
+        a, b = cvvdp_curve[-2], cvvdp_curve[-1]
+        slope = (b['score'] - a['score']) / (b['q'] - a['q'])
+
+    chunk_qs = []
+
+    for row in chunk_cvvdp_scores:
+        chunk = row['chunk']
+        s_i = row['score']
+        average_luma = row.get('average_luma', 0.5)
+
+        # --- compute base delta Q ---
+        delta_q = -(s_i - qadjust_target) / slope
+
+        # --- luma-based damping (ONLY when raising Q) ---
+        if delta_q > 0:
+            if average_luma <= cvvdp_min_luma:
+                luma_scale = 0.0
+            elif average_luma >= cvvdp_max_luma:
+                luma_scale = 1.0
+            else:
+                luma_scale = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
+
+            delta_q *= luma_scale
+            # delta_q < 0 is never damped
+
+        q_i = cvvdp_q + delta_q
+
+        # --- quantize to quarter CRF ---
+        q_i = round(q_i * 4) / 4
+
+        # --- clamp ---
+        q_i = max(qadjust_min_q, min(qadjust_max_q, q_i))
+
+        chunk_qs.append({
+            'chunk': chunk,
+            'q': q_i,
+        })
+
+    return chunk_qs
 
 
 def show_qs(chunklist, reuse_qadjust):
@@ -1743,9 +2292,47 @@ def show_qs(chunklist, reuse_qadjust):
         bar = '#' * int(proportion * bar_width)
         print(f"{q:.2f}: {bar.ljust(bar_width)} {proportion:.2%}")
     print(f"Final weighted CRF: {weighted_crf}")
-    logging.info(f"Final weighted CRF: {weighted_crf}")
+    logger.info(f"Final weighted CRF: {weighted_crf}")
     if reuse_qadjust:
         return weighted_crf
+
+
+def generate_probe_q_range(probes):
+    q_min = 10
+    q_max = 40
+    gamma = 1.4
+    qs = []
+    for i in range(probes):
+        t = i / (probes - 1)
+        q = q_min + (q_max - q_min) * (t ** (1 / gamma))
+        qs.append(int(round(q)))
+
+    return qs
+
+
+def estimate_analysis_q(cvvdp_curve, qadjust_target):
+    """
+    probe_results: list of dicts with keys 'q' and 'score'
+    target_score: desired global score (float)
+
+    returns: analysis Q (float)
+    """
+
+    # Sort by score descending (higher quality first)
+    probe_results = sorted(cvvdp_curve, key=lambda x: x['score'], reverse=True)
+
+    for a, b in zip(cvvdp_curve, cvvdp_curve[1:]):
+        sa, sb = a['score'], b['score']
+        if sa >= qadjust_target >= sb:
+            qa, qb = a['q'], b['q']
+            q_float = qa + (qadjust_target - sa) * (qb - qa) / (sb - sa)
+            return int(round(q_float))
+
+    # Clamp if target is outside probed range
+    if qadjust_target > probe_results[0]['score']:
+        return int(probe_results[0]['q'])
+    else:
+        return int(probe_results[-1]['q'])
 
 
 def terminate_all_processes():
@@ -1780,9 +2367,9 @@ def main():
     parser.add_argument('--graintable', nargs='?', type=str)
     parser.add_argument('--create-graintable', action='store_true')
     parser.add_argument('--scd-method', nargs='?', default=1, type=int)
-    parser.add_argument('--scd-tonemap', nargs='?', type=int)
+    parser.add_argument('--scd-tonemap', nargs='?', default=0, type=int)
     parser.add_argument('--scdetect-only', action='store_true')
-    parser.add_argument('--downscale-scd', nargs='?', default=4, type=int)
+    parser.add_argument('--downscale-scd', nargs='?', default=2, type=int)
     parser.add_argument('--decode-method', nargs='?', default=1, type=int)
     parser.add_argument('--credits-start-frame', nargs='?', type=int)
     parser.add_argument('--credits-q', nargs='?', type=int)
@@ -1797,16 +2384,22 @@ def main():
     parser.add_argument('--cudasynth', action='store_true')
     parser.add_argument('--list-parameters', action='store_true')
     parser.add_argument('--qadjust', action='store_true')
-    parser.add_argument('--qadjust-mode', nargs='?', default=2, type=int)
+    parser.add_argument('--qadjust-mode', nargs='?', default=3, type=int)
     parser.add_argument('--qadjust-reuse', action='store_true')
     parser.add_argument('--qadjust-only', action='store_true')
     parser.add_argument('--qadjust-b', nargs='?', default=-0.5, type=float)
     parser.add_argument('--qadjust-c', nargs='?', default=0.25, type=float)
     parser.add_argument('--qadjust-skip', nargs='?', type=int)
     parser.add_argument('--qadjust-cpu', nargs='?', default=7, type=int)
-    parser.add_argument('--qadjust-workers', nargs='?', default="1,1", type=str)
+    parser.add_argument('--qadjust-workers', nargs='?', type=str)
     parser.add_argument('--qadjust-target', nargs='?', type=float)
-
+    parser.add_argument('--qadjust-min-q', nargs='?', default=10.0, type=float)
+    parser.add_argument('--qadjust-max-q', nargs='?', default=40.0, type=float)
+    parser.add_argument('--cvvdp-min-luma', nargs='?', type=float)
+    parser.add_argument('--cvvdp-max-luma', nargs='?', type=float)
+    parser.add_argument('--probes', nargs='?', default=8, type=int)
+    parser.add_argument('--cvvdp-model', nargs='?', type=str)
+    parser.add_argument('--cvvdp-config', nargs='?', type=str)
 
     # Command-line arguments
     args = parser.parse_args()
@@ -1848,7 +2441,14 @@ def main():
     qadjust_skip = args.qadjust_skip
     qadjust_cpu = args.qadjust_cpu
     qadjust_workers = args.qadjust_workers
-    butter_target = args.qadjust_target
+    qadjust_target = args.qadjust_target
+    qadjust_min_q = args.qadjust_min_q
+    qadjust_max_q = args.qadjust_max_q
+    cvvdp_min_luma = args.cvvdp_min_luma
+    cvvdp_max_luma = args.cvvdp_max_luma
+    probes = args.probes
+    cvvdp_model = args.cvvdp_model
+    cvvdp_config = args.cvvdp_config
     extracl_dict = {}
     dovicl_dict = {}
 
@@ -1915,11 +2515,27 @@ def main():
     if scdetect_only and scd_method == 0:
         print("You must select a scene change detection method.\n")
         sys.exit(1)
+    if qadjust_min_q >= qadjust_max_q:
+        print("Qadjust-min-q must be less than qadjust-max-q.\n")
+        sys.exit(1)
+    if cvvdp_min_luma and 0.0 <= cvvdp_min_luma > 0.99:
+        print("Cvvdp-min-luma must be 0-0.99.\n")
+        sys.exit(1)
+    if cvvdp_max_luma and 0.01 >= cvvdp_max_luma > 1:
+        print("Cvvdp-max-luma must be 0.01-1.0.\n")
+        sys.exit(1)
+    if cvvdp_min_luma and cvvdp_max_luma and cvvdp_min_luma >= cvvdp_max_luma:
+        print("Cvvdp-min-luma must be less than cvvdp-max-luma.\n")
+        sys.exit(1)
     try:
-        workers_str, threads_str = args.qadjust_workers.split(',')
-        qadjust_workers = int(workers_str)
-        qadjust_threads = int(threads_str)
-        if qadjust_threads == 0:
+        if qadjust_workers:
+            workers_str, threads_str = args.qadjust_workers.split(',')
+            qadjust_workers = int(workers_str)
+            qadjust_threads = int(threads_str)
+            if qadjust_threads == 0:
+                qadjust_threads = 1
+        else:
+            qadjust_workers = 1
             qadjust_threads = 1
     except ValueError:
         print("Invalid format for --qadjust-workers. Expected format: workers,threads (e.g., 2,4). Workers = how many parallel chunks calculated, threads = the numStream parameter in VSHIP.")
@@ -1962,7 +2578,7 @@ def main():
     encode_script = os.path.abspath(encode_script)
 
     # Get video props from the source
-    video_width, video_height, video_length, video_transfer, video_matrix, video_framerate, fr = get_video_props(encode_script)
+    video_width, video_height, video_length, video_transfer, video_matrix, video_primaries, video_framerate, fr, chroma_location = get_video_props(encode_script)
 
     if credits_start_frame and credits_start_frame >= video_length - 1:
         print("The credits cannot start at or after the end of video.\n")
@@ -1977,11 +2593,6 @@ def main():
     # Set some more case dependent default values
     if graintable:
         graintable_method = 0
-    if scd_tonemap is None:
-        if video_transfer == 'smpte2084':
-            scd_tonemap = 1
-        else:
-            scd_tonemap = 0
     if credits_cpu is None:
         credits_cpu = cpu + 2
         if credits_cpu > 12:
@@ -2041,6 +2652,12 @@ def main():
         br = math.ceil(q * 0.125)
     else:
         br = 2
+    if video_transfer != 16 and (not cvvdp_min_luma or not cvvdp_max_luma):
+        cvvdp_min_luma = 0.05
+        cvvdp_max_luma = 0.25
+    if video_transfer == 16 and (not cvvdp_min_luma or not cvvdp_max_luma):
+        cvvdp_min_luma = 0.1
+        cvvdp_max_luma = 0.5
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -2057,11 +2674,14 @@ def main():
         default_values = {
             "preset": cpu,
             "lp": threads,
+            "color-primaries": video_primaries,
+            "transfer-characteristics": video_transfer,
+            "matrix-coefficients": video_matrix,
+            "chroma-sample-position": chroma_location
         }
         if master_display:
             default_values['mastering-display'] = '"' + master_display + '"'
             default_values['content-light'] = max_cll
-            default_values['chroma-sample-position'] = 2
     elif encoder == 'x265':
         default_values = {
             "log-level": -1,
@@ -2072,7 +2692,7 @@ def main():
         if master_display:
             default_values['master-display'] = '"' + master_display + '"'
             default_values['max-cll'] = '"' + max_cll + '"'
-        if video_transfer == 'smpte2084':
+        if video_transfer == 16:
             default_values['colorprim'] = 9
             default_values['transfer'] = 16
             default_values['colormatrix'] = 9
@@ -2090,8 +2710,18 @@ def main():
             "chroma-q-offset-v": -q + 2,
         }
 
-    default_params, preset_params, base_working_folder = read_presets(presets, encoder)
+    default_params, preset_params, base_working_folder, preset_config_json = read_presets(presets, encoder)
     encode_params = {**default_values, **default_params, **preset_params}
+
+    if qadjust_mode == 3:
+        if not cvvdp_config:
+            if os.path.isfile(preset_config_json):
+                cvvdp_config = preset_config_json
+        if not cvvdp_model:
+            if video_transfer != 16:
+                cvvdp_model = 'standard_4k'
+            else:
+                cvvdp_model = 'standard_hdr_pq'
 
     if rpu and encoder == 'svt':
         print("Dolby Vision mode detected, please note that it is experimental.\n")
@@ -2167,7 +2797,8 @@ def main():
         else:
             startup_mg_size = 5
 
-        minkeyint = calculate_svt_keyint(video_framerate, 10, int(startup_mg_size), int(hierarchical_levels))
+        # minkeyint = calculate_svt_keyint(video_framerate, 10, int(startup_mg_size), int(hierarchical_levels))
+        minkeyint = -2
         encode_params["keyint"] = minkeyint
 
     if not min_chunk_length:
@@ -2176,7 +2807,7 @@ def main():
         else:
             min_chunk_length = math.ceil(video_framerate) * 2
         print(f"Calculated minimum chunk length is {min_chunk_length} frames.")
-        logging.info(f"Calculated minimum chunk length is {min_chunk_length} frames.")
+        logger.info(f"Calculated minimum chunk length is {min_chunk_length} frames.")
 
     # Create a list of non-empty parameters in the encoder supported format
     if encoder in ('svt', 'rav1e', 'x265'):
@@ -2203,9 +2834,9 @@ def main():
             print("\nParameters from DoVi mode:\n")
             for key, value in dovicl_dict.items():
                 print(key, value)
-        if encoder == 'svt':
-            print("\nKeyint calculated from --startup-mg-size and --hierachical-levels:")
-            print("First mini-GOP hierarchical layers " + str(startup_mg_size) + ", following hierarchical layers " + str(hierarchical_levels) + ", keyint (minimum 10 seconds) " + str(minkeyint) + " frames")
+        # if encoder == 'svt':
+            # print("\nKeyint calculated from --startup-mg-size and --hierachical-levels:")
+            # print("First mini-GOP hierarchical layers " + str(startup_mg_size) + ", following hierarchical layers " + str(hierarchical_levels) + ", keyint (minimum 10 seconds) " + str(minkeyint) + " frames")
         print("\nAll encoding parameters combined:\n")
         encode_params = " ".join(encode_params)
         encode_params = encode_params.replace('  ', ' ')
@@ -2237,7 +2868,7 @@ def main():
 
     # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
     if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
-        if os.path.exists(qadjust_results_file) and not qadjust_only:
+        if os.path.exists(qadjust_results_file) and not qadjust_only and qadjust:
             if not qadjust_reuse:
                 user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
                 if user_choice == 'y' or user_choice == '':
@@ -2250,24 +2881,47 @@ def main():
                     if 'min_chunk_length' in qadjust_data and qadjust_data['min_chunk_length'] != min_chunk_length:
                         print("The current minimum chunk length does not match the qadjust JSON data file, you must rerun the analysis.")
                         sys.exit(0)
-                    if not butter_target:
+                    if not qadjust_target:
                         while True:
                             try:
-                                butter_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
+                                if qadjust_mode == 2:
+                                    qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
+                                elif qadjust_mode == 3:
+                                    qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
                                 break
                             except ValueError:
                                 print("Invalid input. Please enter a numeric (float) value.")
-                    print(f"Recalculating the CRFs based on existing analysis data and Butteraugli target {butter_target}.")
+                    print(f"Recalculating the CRFs based on existing analysis data and target score {qadjust_target}.")
                     chunklist = []
-                    for i in qadjust_data['chunks']:
-                        butter_scores_pass1.append(i['butteraugli_pass1'])
-                        butter_scores_pass2.append(i['butteraugli_pass2'])
-                        chunkdata = {'chunk': i['chunk_number'], 'credits': 0, 'q': i['crf_pass2']}
-                        chunklist.append(chunkdata)
-                    crfs = adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, butter_target, qadjust_cpu, cpu, q, chunklist)
-                    for idx, chunk in enumerate(qadjust_data['chunks']):
-                        chunk['adjusted_Q'] = crfs[idx]
-                    qadjust_data['butter_target'] = butter_target
+                    if qadjust_mode == 2:
+                        for i in qadjust_data['chunks']:
+                            butter_scores_pass1.append(i['butteraugli_pass1'])
+                            butter_scores_pass2.append(i['butteraugli_pass2'])
+                            chunkdata = {'chunk': i['chunk_number'], 'credits': 0, 'q': i['crf_pass2']}
+                            chunklist.append(chunkdata)
+                        crfs = adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_target, qadjust_cpu, cpu, q, chunklist)
+                        for idx, chunk in enumerate(qadjust_data['chunks']):
+                            chunk['adjusted_Q'] = crfs[idx]
+                        qadjust_data['qadjust_target'] = qadjust_target
+                    elif qadjust_mode == 3:
+                        cvvdp_q = qadjust_data['analysis_q']
+                        cvvdp_curve = qadjust_data['cvvdp']['curve']
+                        chunk_cvvdp_scores = [
+                            {
+                                "chunk": i['chunk_number'],
+                                "score": i['cvvdp_score'],
+                                "average_luma": i.get('average_luma', 0.5)
+                            }
+                            for i in qadjust_data['chunks']
+                        ]
+                        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q)
+                        new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
+                        for chunk in qadjust_data['chunks']:
+                            chunk_number = chunk['chunk_number']
+                            chunk['adjusted_Q'] = new_q_by_chunk[chunk_number]
+                        qadjust_data['target'] = qadjust_target
+                        qadjust_data['cvvdp_q_scaling_min_luma'] = cvvdp_min_luma
+                        qadjust_data['cvvdp_q_scaling_max_luma'] = cvvdp_max_luma
         print(f"Cleaning up the existing folder: {output_folder_name}\n")
         clean_folder(output_folder_name)
 
@@ -2277,16 +2931,17 @@ def main():
     os.makedirs(chunks_folder, exist_ok=True)
 
     encode_log_file = os.path.join(output_folder, f"encode_log.txt")
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    logging.basicConfig(filename=encode_log_file, format='%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
-    logging.info("Process started.")
-    if encoder == 'svt':
-        print(f"Calculated minimum keyint is {minkeyint} frames.")
-        logging.info(f"Calculated minimum keyint is {minkeyint} frames.")
+    file_handler = logging.FileHandler(encode_log_file, mode="w", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    buffer.seek(0)
+    for line in buffer:
+        file_handler.stream.write(line)
+    file_handler.flush()
+    logger.removeHandler(buffer_handler)
 
     if reuse_qadjust:
-        logging.info("Processed existing qadjust data from the JSON file.")
+        logger.info("Processed existing qadjust data from the JSON file.")
         with open(qadjust_results_file, 'w') as results_file:
             json.dump(qadjust_data, results_file, indent=4)
 
@@ -2306,10 +2961,10 @@ def main():
                                  output_grain_table_baseline)
                 end_time = datetime.now()
                 graintable_time = end_time - start_time
-                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                logger.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
                 print("Graintable created successfully, the path is:", output_grain_table)
             except Exception as e:
-                logging.error(f"Graintable creation failed, please check your script and settings. Exception code {e}")
+                logger.error(f"Graintable creation failed, please check your script and settings. Exception code {e}")
                 print("Graintable creation failed, please check your script and settings.\n")
                 sys.exit(1)
             sys.exit(0)
@@ -2320,7 +2975,7 @@ def main():
                                  output_grain_table_baseline)
                 end_time = datetime.now()
                 graintable_time = end_time - start_time
-                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                logger.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
                 if qadjust_cycle != 1:
                     encode_params.append(f"--fgs-table \"{output_grain_table}\"")
             elif graintable:
@@ -2332,7 +2987,7 @@ def main():
                                  output_grain_table_baseline)
                 end_time = datetime.now()
                 graintable_time = end_time - start_time
-                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                logger.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
                 encode_params.append(f"--film-grain-table \"{output_grain_table}\"")
             elif graintable:
                 encode_params.append(f"--film-grain-table \"{graintable}\"")
@@ -2342,7 +2997,7 @@ def main():
                                  output_grain_table_baseline)
                 end_time = datetime.now()
                 graintable_time = end_time - start_time
-                logging.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
+                logger.info(f"Graintable created, path {output_grain_table}. Duration {graintable_time}.")
                 encode_params.append(f"--film-grain-table=\"{output_grain_table}\"")
             elif graintable:
                 encode_params.append(f"--film-grain-table=\"{graintable}\"")
@@ -2357,12 +3012,12 @@ def main():
     scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
     if scd_method == 1:
         scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.json")
-        create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, video_width, video_height)
+        create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, downscale_scd)
     elif scd_method == 2:
         scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
         create_scxvid_file(scene_change_csv, scd_tonemap, encode_script, cudasynth, downscale_scd, scd_script, scene_change_file_path)
     scene_changes = convert_qp_to_scene_changes(encode_script)
-    logging.info("Finished processing the scene change data.")
+    logger.info("Finished processing the scene change data.")
     if scdetect_only:
         print("Scene change detection complete.\n")
         sys.exit(0)
@@ -2376,8 +3031,9 @@ def main():
     # Run encoding commands with a set maximum of concurrent processes
     stored_encode_params = encode_params.copy()
     encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scene_changes, video_length, credits_start_frame, min_chunk_length, q,
-                                                                                               credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file,video_width, video_height, qadjust_b, qadjust_c, scripts_folder,
-                                                                                               decode_method, cpu, credits_cpu)
+                                                                                                   credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file,video_width, video_height, qadjust_b, qadjust_c,
+                                                                                                   scripts_folder, decode_method, cpu, credits_cpu, qadjust_reuse)
+
     encode_params_displist = " ".join(encode_params)
     encode_params_displist = encode_params_displist.replace('  ', ' ')
     encode_params_displist = encode_params_displist.replace(f' --crf {q}', '')
@@ -2390,7 +3046,7 @@ def main():
                 if chunklist[i]['credits'] == 1:
                     continue
                 chunklist[i]['q'] = reused_q_values[i]
-            logging.info("Updated CRFs based on the qadjust data.")
+            logger.info("Updated CRFs based on the qadjust data.")
             weighted_crf = show_qs(chunklist, True)
             with open(qadjust_results_file, 'r') as file:
                 qadjust_data = json.load(file)
@@ -2406,28 +3062,32 @@ def main():
         else:
             if not qadjust_skip:
                 if (video_width * video_height) > 921600:
-                    qadjust_skip = 3
+                    if qadjust_mode == 3:
+                        qadjust_skip = 2
+                    else:
+                        qadjust_skip = 3
                 else:
                     qadjust_skip = 1
-            logging.info("Set up chunklist and corresponding encode commands for the Q adjust phase.")
-            print("The encoder parameters for the analysis:", encode_params_displist)
+            logger.info("Set up chunklist and corresponding encode commands for the Q adjust phase.")
             # mode 1 = SSIMU2
             if qadjust_mode == 1:
-                logging.info(f"Started analysis using SSIMULACRA2 using CRF {q}.")
+                logger.info(f"Started analysis using SSIMULACRA2 using CRF {q}.")
                 if encoder != 'x265':
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_.ivf")
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_.hevc")
+                print("The encoder parameters for the analysis:", encode_params_displist)
                 print("Running the analysis pass using your final CRF value.")
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
-                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target,
-                                              avg_bitrate,0,'ssimu2', video_height, min_chunk_length, minkeyint)
+                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode,
+                                              qadjust_cpu, cpu, qadjust_target,avg_bitrate, 0,'ssimu2', min_chunk_length, minkeyint, [], 0, 0, 0, qadjust_min_q,
+                                              qadjust_max_q, cvvdp_model, cvvdp_config)
             # mode 2 = Butteraugli with two passes
-            else:
-                if not butter_target:
+            elif qadjust_mode == 2:
+                if not qadjust_target:
                     while True:
                         try:
-                            butter_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
+                            qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
                             break
                         except ValueError:
                             print("Invalid input. Please enter a numeric (float) value.")
@@ -2445,7 +3105,8 @@ def main():
                     new_out_path = out_path.replace('encoded_chunk_', 'encoded_chunk_pass1_')
 
                     modified_encode_commands.append((new_avs_cmd, new_enc_cmd, new_out_path))
-                logging.info(f"Started analysis using Butteraugli, pass 1 at CRF 24.0.")
+                print("The encoder parameters for the analysis:", encode_params_displist)
+                logger.info(f"Started analysis using Butteraugli, pass 1 at CRF 24.0.")
                 print(f"Running the analysis pass 1 at CRF 24.0.")
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, modified_encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
                 avg_bitrate_qadjust_pass1 = avg_bitrate
@@ -2453,8 +3114,9 @@ def main():
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass1_.ivf")
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass1_.hevc")
-                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target,
-                                              0, avg_bitrate_qadjust_pass1,'butter_pass1', video_height, min_chunk_length, minkeyint)
+                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1,'butter_pass1', min_chunk_length, minkeyint, [], 0,
+                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
                 modified_encode_commands = []
 
                 filtered_chunks = [c for c in chunklist if c.get("credits", 0) != 1]
@@ -2473,22 +3135,85 @@ def main():
                         ]
 
                     modified_encode_commands.append((new_avs_cmd, new_enc_cmd, new_out_path))
-                logging.info("Started analysis using Butteraugli, pass 2.")
+                logger.info("Started analysis using Butteraugli, pass 2.")
                 print("Running the analysis pass 2.")
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, modified_encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
                 if encoder != 'x265':
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass2_.ivf")
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass2_.hevc")
-                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, butter_target,
-                                              0, avg_bitrate_qadjust_pass1,'butter_pass2', video_height, min_chunk_length, minkeyint)
+                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1,'butter_pass2', min_chunk_length, minkeyint, [], 0,
+                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
+            # CVVDP
+            else:
+                if not qadjust_target:
+                    while True:
+                        try:
+                            qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
+                            break
+                        except ValueError:
+                            print("Invalid input. Please enter a numeric (float) value.")
+
+                logger.info("Started analysis using CVVDP.")
+                print("Started analysis using CVVDP.")
+
+                cvvdp_curve = []
+                probe_round = 1
+                probe_qs = generate_probe_q_range(probes)
+                probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file,
+                                                                                                                      video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, minkeyint)
+                encode_params_displist = " ".join(encode_params)
+                encode_params_displist = encode_params_displist.replace('  ', ' ')
+                encode_params_displist = encode_params_displist.replace(f' --crf 0', '')
+                if encoder != 'x265':
+                    output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.ivf")
+                else:
+                    output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.hevc")
+                print("The encoder parameters for the analysis:", encode_params_displist)
+                logger.info(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
+                print(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
+                while probe_round <= probes:
+                    probe_q = probe_qs[probe_round - 1]
+                    for _, enc_cmd, _ in probe_encode_commands:
+                        for i, arg in enumerate(enc_cmd):
+                            if arg.startswith('--crf'):
+                                enc_cmd[i] = f'--crf {probe_q}'
+                                break
+                    logger.info(f'Probing Q: {probe_q}')
+                    print(f'\nProbing Q: {probe_q}')
+                    run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+                    score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
+                                              cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
+
+                    cvvdp_curve.append({'q': probe_q, 'score': score})
+                    qadjust_cycle = 1
+                    probe_round += 1
+
+                if encoder != 'x265':
+                    output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_.ivf")
+                else:
+                    output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_.hevc")
+                cvvdp_q = estimate_analysis_q(cvvdp_curve, qadjust_target)
+                logger.info(f"Running a full analysis at Q {cvvdp_q} to adjust Q per chunk using the curve.")
+                print(f"\nRunning a full analysis at Q {cvvdp_q} to adjust Q per chunk using the curve.")
+                for _, enc_cmd, _ in encode_commands:
+                    for i, arg in enumerate(enc_cmd):
+                        if arg.startswith('--crf'):
+                            enc_cmd[i] = f'--crf {cvvdp_q}'
+                            break
+                run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time=datetime.now())
+                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0,'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q,
+                                              cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
 
             if qadjust_only:
                 try:
                     clean_files(chunks_folder, 'encoded')
                 except Exception as e:
                     print(f"Unable to remove the intermediate files, exception {e}")
-                    logging.warning(f"Unable to remove the intermediate files, exception {e}")
+                    logger.warning(f"Unable to remove the intermediate files, exception {e}")
                 sys.exit(0)
 
         if not qadjust_reuse:
@@ -2497,28 +3222,38 @@ def main():
             clean_files(chunks_folder, 'encoded')
         except Exception as e:
             print(f"Unable to remove the intermediate files, exception {e}")
-            logging.warning(f"Unable to remove the intermediate files, exception {e}")
+            logger.warning(f"Unable to remove the intermediate files, exception {e}")
         encode_commands = []
         input_files = []
         encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scene_changes, video_length, credits_start_frame, min_chunk_length, q,
                                                                                                    credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file, video_width, video_height, qadjust_b, qadjust_c,
-                                                                                                   scripts_folder, decode_method, cpu, credits_cpu)
+                                                                                                   scripts_folder, decode_method, cpu, credits_cpu, qadjust_reuse)
         encode_params_displist = " ".join(encode_params)
         encode_params_displist = encode_params_displist.replace('  ', ' ')
         print("The encoder parameters for the final encode:", encode_params_displist)
         print("\n")
+        qadjust_cycle = -1
         run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
-        concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
+        if not master_display:
+            master_display = None
+        if not max_cll:
+            max_cll = None
+        concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder, video_matrix, video_transfer, video_primaries, chroma_location, master_display, max_cll)
     else:
-        logging.info("Set up chunklist and corresponding encode commands for the final encode.")
+        logger.info("Set up chunklist and corresponding encode commands for the final encode.")
         print("The encoder parameters for the final encode:", encode_params_displist)
         print("\n")
+        qadjust_cycle = -1
         run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
-        concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder)
+        if not master_display:
+            master_display = None
+        if not max_cll:
+            max_cll = None
+        concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, encoder, video_matrix, video_transfer, video_primaries, chroma_location, master_display, max_cll)
 
     end_time_total = datetime.now()
     total_duration = end_time_total - start_time_total
-    logging.info(f"Process finished, total duration {total_duration}.")
+    logger.info(f"Process finished, total duration {total_duration}.")
 
 
 if __name__ == "__main__":
