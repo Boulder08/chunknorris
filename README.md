@@ -245,8 +245,11 @@ Also if you change the minimum chunk length from the value that was used for cal
 
 **--cvvdp-min-luma** and **cvvdp-max-luma**: Determines which range of average luma will have a damping effect when the CVVDP based adjustment raises the q of a chunk due to a better score than the target.
 CVVDP tends to score a little too well with dark frames, and raising q will easily start removing details. These parameters damp the effect in order to prevent this from happening.
+SDR material uses an exponential ramp and HDR a logarithmic one to determine the damping for chunks with average luma between set min and max.
+Chunks with average luma below cvvdp-min-luma will not have their q raised even if they score better than your set target is.
+
 - Example: --cvvdp-min-luma 0.1 --cvvdp-max-luma 0.2
-- Default: min 0.05, max 0.25 for SDR, min 0.1, max 0.5 for HDR
+- Default: min 0.1, max 0.25 for SDR, min 0.1, max 0.4 for HDR
 
 **--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve.
 - Example: --probes 6

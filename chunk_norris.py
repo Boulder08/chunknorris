@@ -2069,7 +2069,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "chunks": qadjust_data["chunks"]
         }
     elif qadjust_mode == 3:
-        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q)
+        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
         new_crf_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
         score_by_chunk = {row['chunk']: row['score'] for row in chunk_cvvdp_scores}
         luma_by_chunk= {row['chunk']: row['average_luma'] for row in chunk_cvvdp_scores}
@@ -2205,7 +2205,7 @@ def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_tar
     return crfs
 
 
-def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q):
+def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer):
     # --- sort probe curve by Q ---
     cvvdp_curve = sorted(cvvdp_curve, key=lambda x: x['q'])
 
@@ -2215,18 +2215,21 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
             slope = (b['score'] - a['score']) / (b['q'] - a['q'])
             break
     else:
-        # fallback (edge of curve)
         a, b = cvvdp_curve[-2], cvvdp_curve[-1]
         slope = (b['score'] - a['score']) / (b['q'] - a['q'])
 
     chunk_qs = []
+
+    # Tunables
+    log_k_hdr = 10.0      # HDR darkness protection strength
+    gamma_sdr = 1.7       # SDR darkness protection strength
 
     for row in chunk_cvvdp_scores:
         chunk = row['chunk']
         s_i = row['score']
         average_luma = row.get('average_luma', 0.5)
 
-        # --- compute base delta Q ---
+        # --- base delta Q ---
         delta_q = -(s_i - qadjust_target) / slope
 
         # --- luma-based damping (ONLY when raising Q) ---
@@ -2236,7 +2239,15 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
             elif average_luma >= cvvdp_max_luma:
                 luma_scale = 1.0
             else:
-                luma_scale = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
+                # Normalize to [0, 1]
+                x = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
+
+                if video_transfer == 16:
+                    # HDR: logarithmic ramp
+                    luma_scale = math.log1p(log_k_hdr * x) / math.log1p(log_k_hdr)
+                else:
+                    # SDR: power ramp
+                    luma_scale = x ** gamma_sdr
 
             delta_q *= luma_scale
             # delta_q < 0 is never damped
@@ -2653,11 +2664,11 @@ def main():
     else:
         br = 2
     if video_transfer != 16 and (not cvvdp_min_luma or not cvvdp_max_luma):
-        cvvdp_min_luma = 0.05
+        cvvdp_min_luma = 0.1
         cvvdp_max_luma = 0.25
     if video_transfer == 16 and (not cvvdp_min_luma or not cvvdp_max_luma):
         cvvdp_min_luma = 0.1
-        cvvdp_max_luma = 0.5
+        cvvdp_max_luma = 0.4
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -2865,6 +2876,8 @@ def main():
     qadjust_results_file = os.path.join(output_folder, f"{output_name}_qadjust.json")
     qadjust_data = {}
     reuse_qadjust = False
+    if qadjust_only:
+        qadjust_reuse = False
 
     # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
     if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
@@ -2914,7 +2927,7 @@ def main():
                             }
                             for i in qadjust_data['chunks']
                         ]
-                        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q)
+                        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
                         new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
                         for chunk in qadjust_data['chunks']:
                             chunk_number = chunk['chunk_number']
@@ -3173,6 +3186,7 @@ def main():
                 print("The encoder parameters for the analysis:", encode_params_displist)
                 logger.info(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
                 print(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
+                qadjust_cycle = 1
                 while probe_round <= probes:
                     probe_q = probe_qs[probe_round - 1]
                     for _, enc_cmd, _ in probe_encode_commands:
@@ -3188,7 +3202,6 @@ def main():
                                               cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
 
                     cvvdp_curve.append({'q': probe_q, 'score': score})
-                    qadjust_cycle = 1
                     probe_round += 1
 
                 if encoder != 'x265':
@@ -3202,7 +3215,8 @@ def main():
                     for i, arg in enumerate(enc_cmd):
                         if arg.startswith('--crf'):
                             enc_cmd[i] = f'--crf {cvvdp_q}'
-                            break
+                        if arg.startswith('--preset'):
+                            enc_cmd[i] = f'--preset {qadjust_cpu}'
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time=datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0,'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q,
