@@ -791,20 +791,23 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                 encode_params_original.append('--complex-hvs 0')
 
         else:
-            replacements_list = {'--preset ': '--preset fast',
+            replacements_list = {'--preset ': '--preset veryfast',
                                  '--limit-refs ': '--limit-refs 3',
                                  '--rdoq-level ': '--rdoq-level 2',
                                  '--rc-lookahead ': '--rc-lookahead 40',
                                  '--lookahead-slices ': '--lookahead-slices 0',
                                  '--subme ': '--subme 3',
-                                 '--me ': '--me umh',
+                                 '--me ': '--me hex',
+                                 '--merange ': '--merange 25',
+                                 '--hme': '--no-hme',
+                                 '--ref ': '--ref 3',
                                  '--b-adapt ': '--b-adapt 2'}
             encode_params_original = [
                 next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
                 for x in encode_params_original
             ]
             if not any('--preset' in param for param in encode_params_original):
-                encode_params_original.append('--preset fast')
+                encode_params_original.append('--preset veryfast')
             if not any('--rdoq-level' in param for param in encode_params_original):
                 encode_params_original.append('--rdoq-level 2')
             if not any('--rc-lookahead' in param for param in encode_params_original):
@@ -813,6 +816,10 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                 encode_params_original.append('--lookahead-slices 0')
             if not any('--b-adapt' in param for param in encode_params_original):
                 encode_params_original.append('--b-adapt 2')
+            if not any('--me ' in param for param in encode_params_original):
+                encode_params_original.append('--me hex')
+            if not any('--merange ' in param for param in encode_params_original):
+                encode_params_original.append('--merange 25')
 
         with open(encode_script, 'r') as file:
             lines = file.readlines()
@@ -992,20 +999,23 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
             encode_params_original.append('--complex-hvs 0')
 
     else:
-        replacements_list = {'--preset ': '--preset fast',
+        replacements_list = {'--preset ': '--preset veryfast',
                              '--limit-refs ': '--limit-refs 3',
                              '--rdoq-level ': '--rdoq-level 2',
                              '--rc-lookahead ': '--rc-lookahead 40',
                              '--lookahead-slices ': '--lookahead-slices 0',
                              '--subme ': '--subme 3',
-                             '--me ': '--me umh',
+                             '--me ': '--me hex',
+                             '--merange ': '--merange 25',
+                             '--hme ': '--no-hme',
+                             '--ref ': '--ref 3',
                              '--b-adapt ': '--b-adapt 2'}
         encode_params_original = [
             next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
             for x in encode_params_original
         ]
         if not any('--preset' in param for param in encode_params_original):
-            encode_params_original.append('--preset fast')
+            encode_params_original.append('--preset veryfast')
         if not any('--rdoq-level' in param for param in encode_params_original):
             encode_params_original.append('--rdoq-level 2')
         if not any('--rc-lookahead' in param for param in encode_params_original):
@@ -1014,6 +1024,10 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
             encode_params_original.append('--lookahead-slices 0')
         if not any('--b-adapt' in param for param in encode_params_original):
             encode_params_original.append('--b-adapt 2')
+        if not any('--me ' in param for param in encode_params_original):
+            encode_params_original.append('--me hex')
+        if not any('--merange ' in param for param in encode_params_original):
+            encode_params_original.append('--merange 25')
 
     with open(encode_script, 'r') as file:
         lines = file.readlines()
@@ -2308,14 +2322,12 @@ def show_qs(chunklist, reuse_qadjust):
         return weighted_crf
 
 
-def generate_probe_q_range(probes):
-    q_min = 10
-    q_max = 40
+def generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q):
     gamma = 1.4
     qs = []
     for i in range(probes):
         t = i / (probes - 1)
-        q = q_min + (q_max - q_min) * (t ** (1 / gamma))
+        q = qadjust_min_q + (qadjust_max_q - qadjust_min_q) * (t ** (1 / gamma))
         qs.append(int(round(q)))
 
     return qs
@@ -2647,13 +2659,10 @@ def main():
         print("Dolby Vision mode cannot be used if mkvmerge is not available, exiting..\n")
         sys.exit(1)
     if qadjust:
+        qadjust_cycle = 1
         if encoder != 'svt' and qadjust_mode == 2:
             print("You can use qadjust-mode 2 only with SVT-AV1.")
             sys.exit(0)
-        if qadjust_reuse:
-            qadjust_cycle = -1
-        else:
-            qadjust_cycle = 1
         if encoder not in ('svt', 'x265'):
             encoder = 'svt'
             print("\nQadjust enabled and encoder not svt or x265, encoder set to SVT-AV1.")
@@ -2811,6 +2820,8 @@ def main():
         # minkeyint = calculate_svt_keyint(video_framerate, 10, int(startup_mg_size), int(hierarchical_levels))
         minkeyint = -2
         encode_params["keyint"] = minkeyint
+    else:
+        minkeyint = video_framerate * 10
 
     if not min_chunk_length:
         if encoder == 'svt':
@@ -2881,6 +2892,8 @@ def main():
 
     # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
     if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
+        if os.path.exists(qadjust_results_file) and qadjust_reuse:
+            qadjust_cycle = -1
         if os.path.exists(qadjust_results_file) and not qadjust_only and qadjust:
             if not qadjust_reuse:
                 user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
@@ -3173,7 +3186,7 @@ def main():
 
                 cvvdp_curve = []
                 probe_round = 1
-                probe_qs = generate_probe_q_range(probes)
+                probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q)
                 probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file,
                                                                                                                       video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, minkeyint)
                 encode_params_displist = " ".join(encode_params)
@@ -3216,7 +3229,18 @@ def main():
                         if arg.startswith('--crf'):
                             enc_cmd[i] = f'--crf {cvvdp_q}'
                         if arg.startswith('--preset'):
-                            enc_cmd[i] = f'--preset {qadjust_cpu}'
+                            if encoder == 'svt':
+                                enc_cmd[i] = f'--preset {qadjust_cpu}'
+                            else:
+                                enc_cmd[i] = ''
+                        if arg.startswith('--hme '):
+                            enc_cmd[i] = '--no-hme'
+                        if arg.startswith('--subme '):
+                            enc_cmd[i] = '--subme 3'
+                        if arg.startswith('--ref '):
+                            enc_cmd[i] = '--ref 3'
+                        if arg.startswith('--merange '):
+                            enc_cmd[i] = '--merange 25'
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time=datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0,'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q,
