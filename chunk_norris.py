@@ -117,7 +117,7 @@ def get_video_props(video_path):
                 logger.info("Setting transfer characteristics manually to \"smpte2084\" (HDR).")
             else:
                 video_transfer = 1
-                print("Setting transfer characteristics manually  to \"bt709\" (SDR).")
+                print("Setting transfer characteristics manually to \"bt709\" (SDR).")
                 logger.info("Setting transfer characteristics manually to \"bt709\" (SDR).")
 
         try:
@@ -2892,64 +2892,69 @@ def main():
 
     # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
     if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
-        if os.path.exists(qadjust_results_file) and qadjust_reuse:
-            qadjust_cycle = -1
-        if os.path.exists(qadjust_results_file) and not qadjust_only and qadjust:
-            if not qadjust_reuse:
-                user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
-                if user_choice == 'y' or user_choice == '':
+        if os.path.exists(qadjust_results_file):
+            if qadjust_reuse:
+                qadjust_cycle = -1
+            if os.path.exists(qadjust_results_file) and not qadjust_only and qadjust:
+                if not qadjust_reuse:
+                    user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
+                    if user_choice == 'y' or user_choice == '':
+                        reuse_qadjust = True
+                else:
                     reuse_qadjust = True
-            else:
-                reuse_qadjust = True
-            if reuse_qadjust:
-                with open(qadjust_results_file, 'r') as file:
-                    qadjust_data = json.load(file)
-                    if 'min_chunk_length' in qadjust_data and qadjust_data['min_chunk_length'] != min_chunk_length:
-                        print("The current minimum chunk length does not match the qadjust JSON data file, you must rerun the analysis.")
-                        sys.exit(0)
-                    if not qadjust_target:
-                        while True:
-                            try:
-                                if qadjust_mode == 2:
-                                    qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
-                                elif qadjust_mode == 3:
-                                    qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
-                                break
-                            except ValueError:
-                                print("Invalid input. Please enter a numeric (float) value.")
-                    print(f"Recalculating the CRFs based on existing analysis data and target score {qadjust_target}.")
-                    chunklist = []
-                    if qadjust_mode == 2:
-                        for i in qadjust_data['chunks']:
-                            butter_scores_pass1.append(i['butteraugli_pass1'])
-                            butter_scores_pass2.append(i['butteraugli_pass2'])
-                            chunkdata = {'chunk': i['chunk_number'], 'credits': 0, 'q': i['crf_pass2']}
-                            chunklist.append(chunkdata)
-                        crfs = adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_target, qadjust_cpu, cpu, q, chunklist)
-                        for idx, chunk in enumerate(qadjust_data['chunks']):
-                            chunk['adjusted_Q'] = crfs[idx]
-                        qadjust_data['qadjust_target'] = qadjust_target
-                    elif qadjust_mode == 3:
-                        cvvdp_q = qadjust_data['analysis_q']
-                        cvvdp_curve = qadjust_data['cvvdp']['curve']
-                        chunk_cvvdp_scores = [
-                            {
-                                "chunk": i['chunk_number'],
-                                "score": i['cvvdp_score'],
-                                "average_luma": i.get('average_luma', 0.5)
-                            }
-                            for i in qadjust_data['chunks']
-                        ]
-                        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
-                        new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
-                        for chunk in qadjust_data['chunks']:
-                            chunk_number = chunk['chunk_number']
-                            chunk['adjusted_Q'] = new_q_by_chunk[chunk_number]
-                        qadjust_data['target'] = qadjust_target
-                        qadjust_data['cvvdp_q_scaling_min_luma'] = cvvdp_min_luma
-                        qadjust_data['cvvdp_q_scaling_max_luma'] = cvvdp_max_luma
+                if reuse_qadjust:
+                    with open(qadjust_results_file, 'r') as file:
+                        qadjust_data = json.load(file)
+                        if 'min_chunk_length' in qadjust_data and qadjust_data['min_chunk_length'] != min_chunk_length:
+                            print("The current minimum chunk length does not match the qadjust JSON data file, you must rerun the analysis.")
+                            sys.exit(0)
+                        if not qadjust_target:
+                            while True:
+                                try:
+                                    if qadjust_mode == 2:
+                                        qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
+                                    elif qadjust_mode == 3:
+                                        qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
+                                    break
+                                except ValueError:
+                                    print("Invalid input. Please enter a numeric (float) value.")
+                        print(f"Recalculating the CRFs based on existing analysis data and target score {qadjust_target}.")
+                        chunklist = []
+                        if qadjust_mode == 2:
+                            for i in qadjust_data['chunks']:
+                                butter_scores_pass1.append(i['butteraugli_pass1'])
+                                butter_scores_pass2.append(i['butteraugli_pass2'])
+                                chunkdata = {'chunk': i['chunk_number'], 'credits': 0, 'q': i['crf_pass2']}
+                                chunklist.append(chunkdata)
+                            crfs = adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_target, qadjust_cpu, cpu, q, chunklist)
+                            for idx, chunk in enumerate(qadjust_data['chunks']):
+                                chunk['adjusted_Q'] = crfs[idx]
+                            qadjust_data['qadjust_target'] = qadjust_target
+                        elif qadjust_mode == 3:
+                            cvvdp_q = qadjust_data['analysis_q']
+                            cvvdp_curve = qadjust_data['cvvdp']['curve']
+                            chunk_cvvdp_scores = [
+                                {
+                                    "chunk": i['chunk_number'],
+                                    "score": i['cvvdp_score'],
+                                    "average_luma": i.get('average_luma', 0.5)
+                                }
+                                for i in qadjust_data['chunks']
+                            ]
+                            new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
+                            new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
+                            for chunk in qadjust_data['chunks']:
+                                chunk_number = chunk['chunk_number']
+                                chunk['adjusted_Q'] = new_q_by_chunk[chunk_number]
+                            qadjust_data['target'] = qadjust_target
+                            qadjust_data['cvvdp_q_scaling_min_luma'] = cvvdp_min_luma
+                            qadjust_data['cvvdp_q_scaling_max_luma'] = cvvdp_max_luma
+        else:
+            qadjust_reuse = False
         print(f"Cleaning up the existing folder: {output_folder_name}\n")
         clean_folder(output_folder_name)
+    else:
+        qadjust_reuse = False
 
     # Create directories if they don't exist
     os.makedirs(output_folder, exist_ok=True)
@@ -3214,7 +3219,7 @@ def main():
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
                                               cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
 
-                    cvvdp_curve.append({'q': probe_q, 'score': score})
+                    cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
                     probe_round += 1
 
                 if encoder != 'x265':
@@ -3233,14 +3238,15 @@ def main():
                                 enc_cmd[i] = f'--preset {qadjust_cpu}'
                             else:
                                 enc_cmd[i] = ''
-                        if arg.startswith('--hme '):
-                            enc_cmd[i] = '--no-hme'
-                        if arg.startswith('--subme '):
-                            enc_cmd[i] = '--subme 3'
-                        if arg.startswith('--ref '):
-                            enc_cmd[i] = '--ref 3'
-                        if arg.startswith('--merange '):
-                            enc_cmd[i] = '--merange 25'
+                        if encoder == 'x265':
+                            if arg.startswith('--hme '):
+                                enc_cmd[i] = '--no-hme'
+                            if arg.startswith('--subme '):
+                                enc_cmd[i] = '--subme 3'
+                            if arg.startswith('--ref '):
+                                enc_cmd[i] = '--ref 3'
+                            if arg.startswith('--merange '):
+                                enc_cmd[i] = '--merange 25'
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time=datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0,'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q,
@@ -3281,7 +3287,6 @@ def main():
         logger.info("Set up chunklist and corresponding encode commands for the final encode.")
         print("The encoder parameters for the final encode:", encode_params_displist)
         print("\n")
-        qadjust_cycle = -1
         run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
         if not master_display:
             master_display = None
