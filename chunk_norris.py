@@ -2752,9 +2752,9 @@ def main():
             cvvdp_min_luma = 0.05
     if not cvvdp_max_luma:
         if video_transfer != 16:
-            cvvdp_min_luma = 0.25
+            cvvdp_max_luma = 0.25
         else:
-            cvvdp_min_luma = 0.17
+            cvvdp_max_luma = 0.17
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':

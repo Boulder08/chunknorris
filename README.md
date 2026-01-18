@@ -249,7 +249,7 @@ SDR material uses an exponential ramp and HDR a logarithmic one to determine the
 Chunks with average luma below cvvdp-min-luma will not have their q raised even if they score better than your set target is.
 
 - Example: --cvvdp-min-luma 0.1 --cvvdp-max-luma 0.2
-- Default: min 0.1, max 0.25 for SDR, min 0.1, max 0.4 for HDR
+- Default: min 0.1, max 0.25 for SDR, min 0.05, max 0.17 for HDR
 
 **--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve.
 - Example: --probes 6
