@@ -2085,6 +2085,8 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
     elif qadjust_mode == 3:
         new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
         new_crf_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
+        scale_by_chunk = {row['chunk']: row['scale'] for row in new_crfs}
+        base_crf_by_chunk = {row['chunk']: row['q_undamped'] for row in new_crfs}
         score_by_chunk = {row['chunk']: row['score'] for row in chunk_cvvdp_scores}
         luma_by_chunk= {row['chunk']: row['average_luma'] for row in chunk_cvvdp_scores}
         qadjust_data["chunks"] = []
@@ -2095,14 +2097,14 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
 
             chunk_number = chunk['chunk']
             new_q = new_crf_by_chunk[chunk_number]
-            chunk_score = float(score_by_chunk[chunk_number])
-            average_luma = float(luma_by_chunk[chunk_number])
 
             qadjust_data["chunks"].append({
                 "chunk_number": chunk_number,
                 "length": chunk['length'],
-                "cvvdp_score": chunk_score,
-                "average_luma": average_luma,
+                "cvvdp_score": float(score_by_chunk[chunk_number]),
+                "average_luma": float(luma_by_chunk[chunk_number]),
+                "luma_scale": float(scale_by_chunk[chunk_number]),
+                "undamped_Q": base_crf_by_chunk[chunk_number],
                 "adjusted_Q": new_q
             })
 
@@ -2220,6 +2222,57 @@ def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_tar
 
 
 def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer):
+    """
+    Adjust per-chunk CRF based on CVVDP scores, with perceptual protection
+    against over-compression in dark scenes using chunk-average luma.
+
+    Core principles:
+      - CVVDP controls Q adjustments globally.
+      - Raising Q (more compression) is *selectively damped* in dark scenes.
+      - Lowering Q (less compression) is never damped.
+      - SDR and HDR use different luma response curves.
+      - Luma is chunk-average, not frame-based.
+
+    Parameters:
+        chunk_cvvdp_scores : list of dict
+            [
+              {
+                'chunk': int,
+                'score': float,
+                'average_luma': float
+              },
+              ...
+            ]
+
+        cvvdp_q : float
+            Reference CRF used during the CVVDP analysis pass.
+
+        qadjust_target : float
+            Target CVVDP score.
+
+        cvvdp_curve : list of dict
+            Probe curve mapping CRF to CVVDP score:
+            [{'q': Q, 'score': S}, ...]
+
+        cvvdp_min_luma : float
+            Below this luma, *raising Q is fully suppressed*.
+            Dark scenes are fully protected.
+
+        cvvdp_max_luma : float
+            At and above this luma, full CVVDP-based Q raising is allowed.
+
+        qadjust_min_q, qadjust_max_q : float
+            Absolute CRF clamp.
+
+        video_transfer : int
+            Transfer characteristic.
+            16 = HDR (PQ), anything else treated as SDR.
+
+    Returns:
+        list of dict
+            [{'chunk': int, 'q': float}, ...]
+    """
+
     # --- sort probe curve by Q ---
     cvvdp_curve = sorted(cvvdp_curve, key=lambda x: x['q'])
 
@@ -2229,53 +2282,73 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
             slope = (b['score'] - a['score']) / (b['q'] - a['q'])
             break
     else:
+        # Fallback: use last segment (edge of curve)
         a, b = cvvdp_curve[-2], cvvdp_curve[-1]
         slope = (b['score'] - a['score']) / (b['q'] - a['q'])
 
     chunk_qs = []
 
-    # Tunables
-    log_k_hdr = 10.0      # HDR darkness protection strength
-    gamma_sdr = 1.7       # SDR darkness protection strength
+    # --- perceptual tuning constants ---
+    # These shape how quickly protection is released as luma increases
+    log_k_hdr = 10.0   # HDR: stronger early protection near black
+    gamma_sdr = 1.7    # SDR: softer but still conservative ramp
 
     for row in chunk_cvvdp_scores:
         chunk = row['chunk']
         s_i = row['score']
         average_luma = row.get('average_luma', 0.5)
 
-        # --- base delta Q ---
+        # --- base CVVDP-derived delta Q ---
+        # Positive delta_q  -> raise Q (more compression)
+        # Negative delta_q  -> lower Q (less compression)
         delta_q = -(s_i - qadjust_target) / slope
+        q_base = cvvdp_q + delta_q
 
         # --- luma-based damping (ONLY when raising Q) ---
         if delta_q > 0:
             if average_luma <= cvvdp_min_luma:
+                # Fully protect dark chunks
                 luma_scale = 0.0
+
             elif average_luma >= cvvdp_max_luma:
+                # Fully trust CVVDP
                 luma_scale = 1.0
+
             else:
-                # Normalize to [0, 1]
+                # Normalize luma into [0, 1]
                 x = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
 
                 if video_transfer == 16:
-                    # HDR: logarithmic ramp
+                    # HDR (PQ):
+                    # Logarithmic ramp keeps protection strong near black,
+                    # releases it smoothly as luma increases.
                     luma_scale = math.log1p(log_k_hdr * x) / math.log1p(log_k_hdr)
                 else:
-                    # SDR: power ramp
+                    # SDR:
+                    # Power ramp reflects diminishing compression efficiency
+                    # gains in dark regions.
                     luma_scale = x ** gamma_sdr
 
             delta_q *= luma_scale
-            # delta_q < 0 is never damped
+            # NOTE: delta_q < 0 (quality increase) is intentionally never damped
+        else:
+            luma_scale = 1.0
 
+        # --- apply adjustment ---
         q_i = cvvdp_q + delta_q
 
-        # --- quantize to quarter CRF ---
+        # --- quantize to quarter-step CRF ---
         q_i = round(q_i * 4) / 4
+        q_base = round(q_base * 4) / 4
 
-        # --- clamp ---
+        # --- clamp to allowed range ---
         q_i = max(qadjust_min_q, min(qadjust_max_q, q_i))
+        q_base = max(qadjust_min_q, min(qadjust_max_q, q_base))
 
         chunk_qs.append({
             'chunk': chunk,
+            'scale': luma_scale,
+            'q_undamped': q_base,
             'q': q_i,
         })
 
@@ -2672,12 +2745,16 @@ def main():
         br = math.ceil(q * 0.125)
     else:
         br = 2
-    if video_transfer != 16 and (not cvvdp_min_luma or not cvvdp_max_luma):
-        cvvdp_min_luma = 0.1
-        cvvdp_max_luma = 0.25
-    if video_transfer == 16 and (not cvvdp_min_luma or not cvvdp_max_luma):
-        cvvdp_min_luma = 0.1
-        cvvdp_max_luma = 0.4
+    if not cvvdp_min_luma:
+        if video_transfer != 16:
+            cvvdp_min_luma = 0.1
+        else:
+            cvvdp_min_luma = 0.05
+    if not cvvdp_max_luma:
+        if video_transfer != 16:
+            cvvdp_min_luma = 0.25
+        else:
+            cvvdp_min_luma = 0.17
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -2943,9 +3020,19 @@ def main():
                             ]
                             new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
                             new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
-                            for chunk in qadjust_data['chunks']:
+                            scale_by_chunk = {i['chunk']: i['scale'] for i in new_crfs}
+                            base_q_by_chunk = {i['chunk']: i['q_undamped'] for i in new_crfs}
+                            for i, chunk in enumerate(qadjust_data['chunks']):
                                 chunk_number = chunk['chunk_number']
-                                chunk['adjusted_Q'] = new_q_by_chunk[chunk_number]
+                                qadjust_data['chunks'][i] = {
+                                    "chunk_number": chunk_number,
+                                    "length": chunk['length'],
+                                    "cvvdp_score": chunk['cvvdp_score'],
+                                    "average_luma": chunk['average_luma'],
+                                    "luma_scale": scale_by_chunk[chunk_number],
+                                    "undamped_Q": base_q_by_chunk[chunk_number],
+                                    "adjusted_Q": new_q_by_chunk[chunk_number]
+                                }
                             qadjust_data['target'] = qadjust_target
                             qadjust_data['cvvdp_q_scaling_min_luma'] = cvvdp_min_luma
                             qadjust_data['cvvdp_q_scaling_max_luma'] = cvvdp_max_luma
