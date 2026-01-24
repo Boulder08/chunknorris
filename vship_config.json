@@ -2,15 +2,15 @@
     "standard_4k" : {
         "diagonal_size_inches": 65,
         "viewing_distance_meters": 2.0,
-        "max_luminance": 200.0,
+        "max_luminance": 203.0,
         "contrast": 1000000.0,
-        "E_ambient": 5.0,
+        "E_ambient": 5.0
     },
     "standard_hdr_pq" : {
         "diagonal_size_inches": 65,
         "viewing_distance_meters": 2.0,
         "max_luminance": 1350.0,
         "contrast": 1000000.0,
-        "E_ambient": 5.0,
+        "E_ambient": 5.0
     }
 }

@@ -972,7 +972,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
 
 
 def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file, video_width, video_height, qadjust_b,
-                            qadjust_c, scripts_folder, decode_method, minkeyint):
+                            qadjust_c, scripts_folder, decode_method, probe_length):
     encode_params_original = stored_encode_params.copy()
     encode_params = []
     probe_encode_commands = []
@@ -1038,10 +1038,6 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
     end_frame = credits_start_frame - 1 if credits_start_frame is not None else video_length - 1 # probing ends before the credits start if defined
     trimmed_clip_length = end_frame - start_frame
 
-    if encoder == 'svt':
-        probe_length = max(2 * minkeyint, 128)
-    else:
-        probe_length = 128
     probe_ratio = 0.05  # size of total sample (1 = full length)
     step = int(round(probe_length / probe_ratio)) # how many frames between samples
     samples = (trimmed_clip_length + step - 1) // step # number of sample chunks
@@ -1767,10 +1763,10 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
     cut_source_clip = core.std.SetFrameProps(cut_source_clip, _Primaries=video_primaries)
     cut_source_clip = core.std.SetFrameProps(cut_source_clip, _ChromaLocation=chroma_location)
 
-    if video_transfer == 'smpte2084':
-        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, resizeToDisplay=1, model_config_json=cvvdp_config)
+    if cvvdp_config is None:
+        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, resizeToDisplay=1)
     else:
-        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, resizeToDisplay=1, model_config_json=cvvdp_config)
+        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, model_config_json=cvvdp_config, resizeToDisplay=1)
 
     frames = cut_source_clip.num_frames
     score = [frame.props['_CVVDP'] for frame in result.frames()]
@@ -2144,6 +2140,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
 
 
 def calculate_svt_keyint(video_framerate, target_keyint_seconds, startup_mg_size, hierarchical_levels):
+    max_keyint = 300
     startup_mg_size = 2 ** (startup_mg_size - 1)
     regular_mg_size = 2 ** (hierarchical_levels - 1)
 
@@ -2160,6 +2157,14 @@ def calculate_svt_keyint(video_framerate, target_keyint_seconds, startup_mg_size
         # Number of regular mini-GOPs needed after first one, rounded UP
         num_regular_mgs = math.ceil(remaining / regular_mg_size)
         aligned_keyint = startup_mg_size + num_regular_mgs * regular_mg_size
+
+    if aligned_keyint >= max_keyint:
+        max_n = math.floor((max_keyint - 1 - startup_mg_size) / regular_mg_size)
+        if max_n < 0:
+            # Even startup MG alone violates the constraint
+            # Best we can do is clamp to startup MG (or raise)
+            return startup_mg_size
+        aligned_keyint = startup_mg_size + max_n * regular_mg_size
 
     return aligned_keyint
 
@@ -2429,6 +2434,58 @@ def estimate_analysis_q(cvvdp_curve, qadjust_target):
         return int(probe_results[0]['q'])
     else:
         return int(probe_results[-1]['q'])
+
+
+def fit_into_4k(video_width, video_height, output_width = 3840, output_height = 2160):
+    """
+    Compute the final resolution when scaling a source frame to fit inside a 4K box
+    (default 3840x2160) while preserving aspect ratio.
+
+    Guarantees:
+      - output_w <= output_width and output_h <= output_height
+      - at least one of (output_w == output_width) or (output_h == output_height) holds,
+        unless allow_upscale=False and the source is already smaller than the box.
+
+    Notes:
+      - Uses floor for the non-limiting dimension to avoid exceeding the box due to rounding.
+      - If even=True, makes dimensions even by rounding down (common encoder requirement).
+    """
+    allow_upscale = True
+    even = True
+
+    if video_width <= 0 or video_height <= 0:
+        raise ValueError(f"Source dimensions must be positive, got {video_width}x{video_height}")
+
+    scale_w = output_width / video_width
+    scale_h = output_height / video_height
+    scale = min(scale_w, scale_h)
+
+    if not allow_upscale:
+        scale = min(scale, 1.0)
+
+    # Choose which side "hits" first, then compute the other by flooring.
+    if scale == scale_w and (allow_upscale or scale_w <= 1.0):
+        out_w = output_width if scale != 1.0 else video_width
+        out_h = int(video_height * (out_w / video_width))
+    else:
+        out_h = output_height if scale != 1.0 else video_height
+        out_w = int(video_width * (out_h / video_height))
+
+    if even:
+        # Keep the limiting dimension intact (3840/2160 are already even).
+        if out_w == output_width:
+            out_h -= out_h % 2
+        elif out_h == output_height:
+            out_w -= out_w % 2
+        else:
+            # allow_upscale=False case (no scaling): just evenize both safely.
+            out_w -= out_w % 2
+            out_h -= out_h % 2
+
+        out_w = max(2, out_w)
+        out_h = max(2, out_h)
+
+    return out_w, out_h
 
 
 def terminate_all_processes():
@@ -2894,15 +2951,26 @@ def main():
         else:
             startup_mg_size = 5
 
-        # minkeyint = calculate_svt_keyint(video_framerate, 10, int(startup_mg_size), int(hierarchical_levels))
-        minkeyint = -2
+        minkeyint = (calculate_svt_keyint(video_framerate, 10, int(startup_mg_size), int(hierarchical_levels))) + 1
         encode_params["keyint"] = minkeyint
+        print(f"Calculated minimum keyint interval is {minkeyint} frames.")
+        logger.info(f"Calculated minimum keyint interval is {minkeyint} frames.")
     else:
         minkeyint = video_framerate * 10
 
+    if qadjust_mode == 3:
+        if encoder == 'svt':
+            startup_mg = 1 << (startup_mg_size - 1)
+            normal_mg = 1 << (hierarchical_levels - 1)
+            probe_length = 2 * (startup_mg + normal_mg) + 1
+        else:
+            probe_length = 128
+
     if not min_chunk_length:
         if encoder == 'svt':
-            min_chunk_length = calculate_svt_keyint(video_framerate, 2, int(startup_mg_size), int(hierarchical_levels))
+            startup_mg = 1 << (startup_mg_size - 1)
+            normal_mg = 1 << (hierarchical_levels - 1)
+            min_chunk_length = startup_mg + normal_mg + 1
         else:
             min_chunk_length = math.ceil(video_framerate) * 2
         print(f"Calculated minimum chunk length is {min_chunk_length} frames.")
@@ -3047,6 +3115,15 @@ def main():
     os.makedirs(output_folder, exist_ok=True)
     os.makedirs(scripts_folder, exist_ok=True)
     os.makedirs(chunks_folder, exist_ok=True)
+
+    if qadjust_mode == 3:
+        if cvvdp_config is not None:
+            with open(cvvdp_config, 'r') as f:
+                config = json.load(f)
+            if cvvdp_model not in config:
+                print(f"CVVDP model '{cvvdp_model}' not found in {cvvdp_config}!")
+                logging.error(f"CVVDP model '{cvvdp_model}' not found in {cvvdp_config}!")
+                sys.exit(1)
 
     encode_log_file = os.path.join(output_folder, f"encode_log.txt")
     file_handler = logging.FileHandler(encode_log_file, mode="w", encoding="utf-8")
@@ -3280,7 +3357,7 @@ def main():
                 probe_round = 1
                 probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q)
                 probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file,
-                                                                                                                      video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, minkeyint)
+                                                                                                                      video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, probe_length)
                 encode_params_displist = " ".join(encode_params)
                 encode_params_displist = encode_params_displist.replace('  ', ' ')
                 encode_params_displist = encode_params_displist.replace(f' --crf 0', '')
