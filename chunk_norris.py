@@ -1979,7 +1979,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "avg_bitrate": avg_bitrate,
             "ssimu2_harmonic_mean_score": average,
             "min_chunk_length": min_chunk_length,
-            "min_keyint": minkeyint,
+            "keyint": minkeyint,
             "chunks": []
         }
     elif phase == 'butter_pass2':
@@ -1989,7 +1989,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "avg_bitrate_qadjust_pass1": avg_bitrate_qadjust_pass1,
             "butteraugli_score_pass1": average_qadjust_pass1,
             "min_chunk_length": min_chunk_length,
-            "min_keyint": minkeyint,
+            "keyint": minkeyint,
             "chunks": []
         }
     elif phase == 'cvvdp':
@@ -2005,7 +2005,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "cvvdp_q_scaling_min_luma": cvvdp_min_luma,
             "cvvdp_q_scaling_max_luma": cvvdp_max_luma,
             "min_chunk_length": min_chunk_length,
-            "min_keyint": minkeyint,
+            "keyint": minkeyint,
             "chunks": []
         }
 
@@ -2811,7 +2811,7 @@ def main():
         if video_transfer != 16:
             cvvdp_max_luma = 0.25
         else:
-            cvvdp_max_luma = 0.17
+            cvvdp_max_luma = 0.2
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -2953,8 +2953,8 @@ def main():
 
         minkeyint = (calculate_svt_keyint(video_framerate, 10, int(startup_mg_size), int(hierarchical_levels))) + 1
         encode_params["keyint"] = minkeyint
-        print(f"Calculated minimum keyint interval is {minkeyint} frames.")
-        logger.info(f"Calculated minimum keyint interval is {minkeyint} frames.")
+        print(f"Calculated keyint interval is {minkeyint} frames.")
+        logger.info(f"Calculated keyint interval is {minkeyint} frames.")
     else:
         minkeyint = video_framerate * 10
 
@@ -2962,7 +2962,7 @@ def main():
         if encoder == 'svt':
             startup_mg = 1 << (startup_mg_size - 1)
             normal_mg = 1 << (hierarchical_levels - 1)
-            probe_length = 2 * (startup_mg + normal_mg) + 1
+            probe_length = startup_mg + (3 * normal_mg) + 1
         else:
             probe_length = 128
 
