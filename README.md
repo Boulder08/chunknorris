@@ -226,7 +226,7 @@ Also if you change the minimum chunk length from the value that was used for cal
 
 **--qadjust-skip**: Defines how many frames the calculation should skip to speed up the process. Setting skip to 1 means all frames will be used.
 - Example: --qadjust-skip 4
-- Default: 1 for resolutions less than HD and 2 for HD and above with CVVDP, 3 for HD and above with other metrics.
+- Default: 1 for CVVDP, for other metrics 1 for resolutions less than HD, 3 for HD and above.
 
 **--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1
 - Default: 7
@@ -241,19 +241,19 @@ Also if you change the minimum chunk length from the value that was used for cal
 
 **--qadjust-min-q** and **--qadjust-max-q**: Determines the range of allowed q for CVVDP based adjustment. This affects also the probing phase.
 - Example: --qadjust-min-q 15.0 --qadjust-max-q 32.0
-- Default: min 10.0, max 40.0
+- Default: min 15.0, max 35.0
 
 **--cvvdp-min-luma** and **cvvdp-max-luma**: Determines which range of average luma will have a damping effect when the CVVDP based adjustment raises the q of a chunk due to a better score than the target.
 CVVDP tends to score a little too well with dark frames, and raising q will easily start removing details. These parameters damp the effect in order to prevent this from happening.
 SDR material uses an exponential ramp and HDR a logarithmic one to determine the damping for chunks with average luma between set min and max.
 Chunks with average luma below cvvdp-min-luma will not have their q raised even if they score better than your set target is.
 
-- Example: --cvvdp-min-luma 0.1 --cvvdp-max-luma 0.2
-- Default: min 0.1, max 0.25 for SDR, min 0.05, max 0.17 for HDR
+- Example: --cvvdp-min-luma 0.00015 --cvvdp-max-luma 0.003
+- Default: min 0.00035, max 0.0025 for both SDR and HDR
 
 **--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve.
 - Example: --probes 6
-- Default: 8
+- Default: 8 if range between qadjust-min-q and qadjust-max-q is 20 points or more, 7 if range is 15-19 and 5 if less than 15.
 
 **--cvvdp-model**: Defines the display model the CVVDP analysis uses. See https://codeberg.org/Line-fr/Vship/src/branch/main/doc/CVVDP.md for more information.
 - Example: --cvvdp-model standard_4k
@@ -264,6 +264,7 @@ Please note that presets.ini contains the key 'model_config_json' which you can 
 **It is very important to set the parameters according to your own setup to get accurate CVVDP results!**
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
+The script enables the "resizeToDisplay" parameter so Vship will upscale both the source and encoded file to match the display resolution from the model/config file.
 
 
 ---

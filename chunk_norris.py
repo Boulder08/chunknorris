@@ -1771,19 +1771,29 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
     frames = cut_source_clip.num_frames
     score = [frame.props['_CVVDP'] for frame in result.frames()]
 
-    if phase != 'cvvdp_probing':
-        luma_clip = cut_source_clip.std.ShufflePlanes(planes=0, colorfamily=vs.GRAY)
-        stats_clip = luma_clip.std.PlaneStats()
-
-        luma_sum = 0.0
-        luma_frames = stats_clip.num_frames
-
-        for f in stats_clip.frames():
-            luma_sum += f.props['PlaneStatsAverage']
-
-        average_luma = luma_sum / luma_frames
-    else:
+    if phase == 'cvvdp_probing':
         average_luma = 0.0
+    else:
+        nom = 100.0  # shared scale for SDR and HDR
+
+        luma_clip = core.resize.Bicubic(
+            cut_source_clip,
+            format=vs.YUV444PS,
+            transfer_in=video_transfer,
+            transfer=8,  # linear
+            nominal_luminance=nom,
+        )
+
+        luma_clip = luma_clip.std.ShufflePlanes(planes=0, colorfamily=vs.GRAY)
+        luma_clip = core.std.Expr(luma_clip, expr=["x 1e-6 max log"])
+        stats = luma_clip.std.PlaneStats()
+
+        s = 0.0
+        n = stats.num_frames
+        for f in stats.frames():
+            s += f.props["PlaneStatsAverage"]
+
+        average_luma = math.exp(s / n)
 
     return chunk['chunk'], score[-1], score[-1] * frames, frames, average_luma, average_luma * frames
 
@@ -1970,8 +1980,8 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             return weighted_average
         else:
             weighted_average_luma = total_weight_luma / weighted_frames
-            print(f'CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.5f}')
-            logger.info(f"CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.5f}")
+            print(f'CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.6f}')
+            logger.info(f"CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.6f}")
 
     if qadjust_mode == 1:
         qadjust_data = {
@@ -2233,49 +2243,34 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
 
     Core principles:
       - CVVDP controls Q adjustments globally.
-      - Raising Q (more compression) is *selectively damped* in dark scenes.
+      - Raising Q (more compression) is selectively damped in dark scenes.
       - Lowering Q (less compression) is never damped.
       - SDR and HDR use different luma response curves.
       - Luma is chunk-average, not frame-based.
 
     Parameters:
         chunk_cvvdp_scores : list of dict
-            [
-              {
-                'chunk': int,
-                'score': float,
-                'average_luma': float
-              },
-              ...
-            ]
-
+            [{'chunk': int, 'score': float, 'average_luma': float}, ...]
         cvvdp_q : float
-            Reference CRF used during the CVVDP analysis pass.
-
+            Reference CRF used during CVVDP analysis pass.
         qadjust_target : float
             Target CVVDP score.
-
         cvvdp_curve : list of dict
-            Probe curve mapping CRF to CVVDP score:
-            [{'q': Q, 'score': S}, ...]
-
+            Probe curve mapping CRF to CVVDP score [{'q': Q, 'score': S}, ...]
         cvvdp_min_luma : float
-            Below this luma, *raising Q is fully suppressed*.
-            Dark scenes are fully protected.
-
+            Below this luma, raising Q is fully suppressed.
         cvvdp_max_luma : float
             At and above this luma, full CVVDP-based Q raising is allowed.
-
-        qadjust_min_q, qadjust_max_q : float
-            Absolute CRF clamp.
-
+        qadjust_min_q : float
+            Absolute CRF clamp (minimum).
+        qadjust_max_q : float
+            Absolute CRF clamp (maximum).
         video_transfer : int
-            Transfer characteristic.
-            16 = HDR (PQ), anything else treated as SDR.
+            Transfer characteristic. 16 = HDR (PQ), otherwise SDR.
 
     Returns:
         list of dict
-            [{'chunk': int, 'q': float}, ...]
+            [{'chunk': int, 'scale': float, 'q_undamped': float, 'q': float}, ...]
     """
 
     # --- sort probe curve by Q ---
@@ -2287,55 +2282,42 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
             slope = (b['score'] - a['score']) / (b['q'] - a['q'])
             break
     else:
-        # Fallback: use last segment (edge of curve)
+        # fallback: use last segment
         a, b = cvvdp_curve[-2], cvvdp_curve[-1]
         slope = (b['score'] - a['score']) / (b['q'] - a['q'])
 
     chunk_qs = []
 
-    # --- perceptual tuning constants ---
-    # These shape how quickly protection is released as luma increases
-    log_k_hdr = 10.0   # HDR: stronger early protection near black
-    gamma_sdr = 1.7    # SDR: softer but still conservative ramp
+    # perceptual tuning constants
+    log_k_hdr = 10.0   # HDR: strong protection near black
+    gamma_sdr = 1.7    # SDR: softer ramp
 
     for row in chunk_cvvdp_scores:
         chunk = row['chunk']
         s_i = row['score']
-        average_luma = row.get('average_luma', 0.5)
+        average_luma = row.get('average_luma', 0.005)
 
         # --- base CVVDP-derived delta Q ---
-        # Positive delta_q  -> raise Q (more compression)
-        # Negative delta_q  -> lower Q (less compression)
         delta_q = -(s_i - qadjust_target) / slope
         q_base = cvvdp_q + delta_q
 
-        # --- luma-based damping (ONLY when raising Q) ---
+        # --- luma-based damping only when raising Q ---
         if delta_q > 0:
             if average_luma <= cvvdp_min_luma:
-                # Fully protect dark chunks
                 luma_scale = 0.0
-
-            elif average_luma >= cvvdp_max_luma:
-                # Fully trust CVVDP
-                luma_scale = 1.0
-
-            else:
-                # Normalize luma into [0, 1]
+            elif average_luma < cvvdp_max_luma:
+                # Normalize luma into [0,1]
                 x = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
-
                 if video_transfer == 16:
-                    # HDR (PQ):
-                    # Logarithmic ramp keeps protection strong near black,
-                    # releases it smoothly as luma increases.
+                    # HDR: logarithmic ramp
                     luma_scale = math.log1p(log_k_hdr * x) / math.log1p(log_k_hdr)
                 else:
-                    # SDR:
-                    # Power ramp reflects diminishing compression efficiency
-                    # gains in dark regions.
+                    # SDR: power ramp
                     luma_scale = x ** gamma_sdr
-
+            else:
+                # Full Q raising allowed
+                luma_scale = 1.0
             delta_q *= luma_scale
-            # NOTE: delta_q < 0 (quality increase) is intentionally never damped
         else:
             luma_scale = 1.0
 
@@ -2546,11 +2528,11 @@ def main():
     parser.add_argument('--qadjust-cpu', nargs='?', default=7, type=int)
     parser.add_argument('--qadjust-workers', nargs='?', type=str)
     parser.add_argument('--qadjust-target', nargs='?', type=float)
-    parser.add_argument('--qadjust-min-q', nargs='?', default=10.0, type=float)
-    parser.add_argument('--qadjust-max-q', nargs='?', default=40.0, type=float)
+    parser.add_argument('--qadjust-min-q', nargs='?', default=15.0, type=float)
+    parser.add_argument('--qadjust-max-q', nargs='?', default=35.0, type=float)
     parser.add_argument('--cvvdp-min-luma', nargs='?', type=float)
     parser.add_argument('--cvvdp-max-luma', nargs='?', type=float)
-    parser.add_argument('--probes', nargs='?', default=8, type=int)
+    parser.add_argument('--probes', nargs='?', type=int)
     parser.add_argument('--cvvdp-model', nargs='?', type=str)
     parser.add_argument('--cvvdp-config', nargs='?', type=str)
 
@@ -2714,7 +2696,7 @@ def main():
         if shutil.which("x265.exe") is None:
             print("Unable to find x265.exe from PATH, exiting..\n")
             sys.exit(1)
-    if decode_method == 1:
+    if decode_method == 0:
         if shutil.which("avs2yuv64.exe") is None:
             print("Unable to find avs2yuv64.exe from PATH, exiting..\n")
             sys.exit(1)
@@ -2803,15 +2785,16 @@ def main():
     else:
         br = 2
     if not cvvdp_min_luma:
-        if video_transfer != 16:
-            cvvdp_min_luma = 0.1
-        else:
-            cvvdp_min_luma = 0.05
+        cvvdp_min_luma = 0.00035
     if not cvvdp_max_luma:
-        if video_transfer != 16:
-            cvvdp_max_luma = 0.25
+        cvvdp_max_luma = 0.0025
+    if not probes:
+        if qadjust_max_q - qadjust_min_q >= 20:
+            probes = 8
+        elif 20 > qadjust_max_q - qadjust_min_q >= 15:
+            probes = 7
         else:
-            cvvdp_max_luma = 0.2
+            probes = 5
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -2960,11 +2943,12 @@ def main():
 
     if qadjust_mode == 3:
         if encoder == 'svt':
+            # probe snippet size will be svt-av1 lookahead length + 1
             startup_mg = 1 << (startup_mg_size - 1)
             normal_mg = 1 << (hierarchical_levels - 1)
-            probe_length = startup_mg + (3 * normal_mg) + 1
+            probe_length = startup_mg + normal_mg + 1
         else:
-            probe_length = 128
+            probe_length = 64
 
     if not min_chunk_length:
         if encoder == 'svt':
@@ -3001,9 +2985,6 @@ def main():
             print("\nParameters from DoVi mode:\n")
             for key, value in dovicl_dict.items():
                 print(key, value)
-        # if encoder == 'svt':
-            # print("\nKeyint calculated from --startup-mg-size and --hierachical-levels:")
-            # print("First mini-GOP hierarchical layers " + str(startup_mg_size) + ", following hierarchical layers " + str(hierarchical_levels) + ", keyint (minimum 10 seconds) " + str(minkeyint) + " frames")
         print("\nAll encoding parameters combined:\n")
         encode_params = " ".join(encode_params)
         encode_params = encode_params.replace('  ', ' ')
@@ -3258,7 +3239,7 @@ def main():
             if not qadjust_skip:
                 if (video_width * video_height) > 921600:
                     if qadjust_mode == 3:
-                        qadjust_skip = 2
+                        qadjust_skip = 1
                     else:
                         qadjust_skip = 3
                 else:
