@@ -131,6 +131,7 @@ python chunk_norris.py encode_script [options]
 
 **--graintable**: Defines a (full) path to an existing Film Grain Synthesis grain table file, which you can get by using grav1synth. There are also some tables in the av1-graintables directory. Note that sometimes it is a good option to use a B/W grain table as ones with chroma grain can increase saturation of the video too much.
 The lower resolution tables often contain a little more, or sharper grain compared to the higher resolution counterparts.
+**NOTE:** If you use a recent SVT-AV1-HDR build, the included internal photon noise generator is a better choice (if you don't wish to use --film-grain).
 - Example: --graintable C:\Temp\grain.tbl
 - Default: None
 
@@ -235,13 +236,19 @@ Also if you change the minimum chunk length from the value that was used for cal
 - Example: --qadjust-workers 4,1
 - Default: 1,1
 
-**--qadjust-target**: Defines the target Butteraugli or CVVDP score. Note: if you already have run the analysis and the JSON file is found, you can use --qadjust-reuse and --qadjust-target to recalculate the final CRFs for chunks as needed.
+**--qadjust-target**: Defines the target Butteraugli or CVVDP score.
+Note: if you already have run the analysis and the JSON file is found, you can use --qadjust-reuse and --qadjust-target to recalculate the final CRFs for chunks as needed.
+If you omit this parameter and you use qadjust-mode 3, the script will set the knee point score as the target (see --cvvdp-bias).
 - Example: --qadjust-target 9.8
 - Default: None
 
 **--qadjust-min-q** and **--qadjust-max-q**: Determines the range of allowed q for CVVDP based adjustment. This affects also the probing phase.
-- Example: --qadjust-min-q 15.0 --qadjust-max-q 32.0
-- Default: min 15.0, max 35.0
+- Example: --qadjust-min-q 15 --qadjust-max-q 30
+- Default: min 20, max 35
+
+**--cvvdp-bias**: If you omit qadjust-target and use qadjust-mode 3, the script will target the score of the curve knee point. This parameter can be used to set an offset to the corresponding CRF (and subsequently the score).
+- Example: --cvvdp-bias -1
+- Default: 0
 
 **--cvvdp-min-luma** and **cvvdp-max-luma**: Determines which range of average luma will have a damping effect when the CVVDP based adjustment raises the q of a chunk due to a better score than the target.
 CVVDP tends to score a little too well with dark frames, and raising q will easily start removing details. These parameters damp the effect in order to prevent this from happening.
@@ -251,9 +258,10 @@ Chunks with average luma below cvvdp-min-luma will not have their q raised even 
 - Example: --cvvdp-min-luma 0.00015 --cvvdp-max-luma 0.003
 - Default: min 0.00035, max 0.0025 for both SDR and HDR
 
-**--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve.
+**--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve before the two refinement probes.
+The script will first find the "knee" point in the curve, i.e. the CRF value beyond which the increased bitrate yields less and less increase in quality. Then it runs two refinement probes on both sides of the knee and recalculates the knee point using all probes as reference.
 - Example: --probes 6
-- Default: 8 if range between qadjust-min-q and qadjust-max-q is 20 points or more, 7 if range is 15-19 and 5 if less than 15.
+- Default: 7 if range between qadjust-min-q and qadjust-max-q is 20 points or more, 6 if range is 15-19 and 5 if less than 15.
 
 **--cvvdp-model**: Defines the display model the CVVDP analysis uses. See https://codeberg.org/Line-fr/Vship/src/branch/main/doc/CVVDP.md for more information.
 - Example: --cvvdp-model standard_4k
@@ -263,8 +271,13 @@ Chunks with average luma below cvvdp-min-luma will not have their q raised even 
 Please note that presets.ini contains the key 'model_config_json' which you can use to autoload the file. The example file is one I use in my own encodes for my home theater setup.
 **It is very important to set the parameters according to your own setup to get accurate CVVDP results!**
 
+**--cvvdp-resizetodisplay**: Defines if the source and encode are scaled to match the display resolution (from the CVVDP config).
+**NOTE:** If this parameter is not set, the CVVDP score is calculated with display resolution matching the source and encode resolution. Because of this, the scores between the two methods are not comparable - and scores between different resolutions neither!
+- Default: not set
+
+**--cvvdp-probing-only**: Runs only the initial probing phase and exits. The results are used if you run a normal process afterwards and the result csv is found from the output folder. This mode is useful if you want to see what kind of CVVDP scores and bitrates you would get at various CRFs.
+
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
-The script enables the "resizeToDisplay" parameter so Vship will upscale both the source and encoded file to match the display resolution from the model/config file.
 
 
 ---

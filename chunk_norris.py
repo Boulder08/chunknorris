@@ -21,6 +21,8 @@ import warnings
 import ffmpeg
 import numpy as np
 import io
+import csv
+import ast
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from datetime import datetime
@@ -837,13 +839,13 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
             qadjust_script.write('catch(err) {\n')
             qadjust_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
             qadjust_script.write('}\n')
-            qadjust_script.write('ConvertBits(10)')
+            qadjust_script.write('BitsPerComponent() > 10 ? ConvertBits(10, dither=0) : ConvertBits(10)')
     for i in chunklist:
         if qadjust_cycle == 1 and i['credits'] == 1:
             continue
         encode_params = copy.deepcopy(encode_params_original)
         if encoder in ('svt', 'x265'):
-            encode_params.append(f'--crf {i['q']}')
+            encode_params.append(f"--crf {i['q']}")
         if rpu and encoder in ('svt', 'x265') and qadjust_cycle != 1:
             rpupath = os.path.join(chunks_folder, f"scene_{i['chunk']}_rpu.bin")
             encode_params.append(f'--dolby-vision-rpu {rpupath}')
@@ -858,7 +860,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                 scene_script.write(f'Import("{encode_script}")\n')
                 scene_script.write(f"Trim({i['start']}, {i['end']})\n")
                 if encoder != 'x265':
-                    scene_script.write('ConvertBits(10)')
+                    scene_script.write('BitsPerComponent() > 10 ? ConvertBits(10, dither=0) : ConvertBits(10)')
         else:
             with open(scene_script_file, 'w') as scene_script:
                 # scene_script.write(source)
@@ -1079,7 +1081,7 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
         qadjust_script.write('catch(err) {\n')
         qadjust_script.write(f'BicubicResize({video_width},{video_height},b={qadjust_b},c={qadjust_c})\n')
         qadjust_script.write('}\n')
-        qadjust_script.write('ConvertBits(10)')
+        qadjust_script.write('BitsPerComponent() > 10 ? ConvertBits(10, dither=0) : ConvertBits(10)')
 
     # print(probe_chunklist)
     for i in probe_chunklist:
@@ -1325,7 +1327,7 @@ def encode_sample(output_folder, encode_script, encode_params, rpu, encoder, sam
         sample_script.write(f'Import("{encode_script}")\n')
         sample_script.write(f"Trim({sample_start_frame}, {sample_end_frame})\n")
         if encoder != 'x265':
-            sample_script.write('ConvertBits(10)')  # workaround to aomenc bug with 8-bit input and film grain table
+            sample_script.write('BitsPerComponent() > 10 ? ConvertBits(10, dither=0) : ConvertBits(10)')  # workaround to aomenc bug with 8-bit input and film grain table
 
     if decode_method == 0:
         decode_command_sample = [
@@ -1588,7 +1590,6 @@ def read_presets(presets, encoder):
 
     return default_params, merged_params, base_working_folder, preset_config_json
 
-
 def calculate_ssimu2_stats(score_list: list[int]):
     filtered_score_list = [score for score in score_list if score >= 0]
     average = np.mean(filtered_score_list)
@@ -1668,12 +1669,12 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
 
 def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qadjust_threads, qadjust_target, phase, video_matrix, video_transfer, video_primaries, chroma_location):
     import vapoursynth as vs
-
     core = vs.core
-    core.max_cache_size = 2048
+    core.max_cache_size = 4096
+    core.num_threads = 2  # workaround to non-deterministic results
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
-    cut_encoded_clip = core.lsmas.LWLibavSource(source=f"{name}{chunk['chunk']}{ext}", cache=0)
+    cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=0)
 
     if skip != 1:
         cut_source_clip = cut_source_clip.std.SelectEvery(cycle=skip, offsets=0)
@@ -1711,10 +1712,11 @@ def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qad
 def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, metrics_plugin, qadjust_threads):
     import vapoursynth as vs
     core = vs.core
-    core.max_cache_size = 2048
+    core.max_cache_size = 4096
+    core.num_threads = 2  # workaround to non-deterministic results
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
-    cut_encoded_clip = core.lsmas.LWLibavSource(source=f"{name}{chunk['chunk']}{ext}", cache=0)
+    cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=0)
 
     if metrics_plugin == 3:
         cut_source_clip = cut_source_clip.resize.Bicubic(format=vs.RGBS, matrix_in_s=video_matrix).fmtc.transfer(transs="srgb", transd="linear", bits=32)
@@ -1746,13 +1748,14 @@ def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_ma
     return chunk['chunk'], avg, scores, p5
 
 
-def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, phase, cvvdp_model, cvvdp_config):
+def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, phase, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay):
     import vapoursynth as vs
     core = vs.core
-    core.max_cache_size = 2048
+    core.max_cache_size = 4096
+    core.num_threads = 2 # workaround to non-deterministic results
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
-    cut_encoded_clip = core.lsmas.LWLibavSource(source=f"{name}{chunk['chunk']}{ext}", cache=0)
+    cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=0)
     if skip != 1:
         cut_source_clip = cut_source_clip.std.SelectEvery(cycle=skip, offsets=0)
         cut_encoded_clip = cut_encoded_clip.std.SelectEvery(cycle=skip, offsets=0)
@@ -1765,6 +1768,8 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
 
     if cvvdp_config is None:
         result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, resizeToDisplay=1)
+    elif not cvvdp_resizetodisplay:
+        result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, model_config_json=cvvdp_config, resizeToDisplay=0)
     else:
         result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, model_config_json=cvvdp_config, resizeToDisplay=1)
 
@@ -1800,7 +1805,8 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
 
 # noinspection PyTypeChecker,PyUnboundLocalVariable
 def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu,
-                      cpu, qadjust_target, avg_bitrate, avg_bitrate_qadjust_pass1, phase, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config):
+                      cpu, qadjust_target, avg_bitrate, avg_bitrate_qadjust_pass1, phase, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
+                      cvvdp_resizetodisplay, local_slope):
     global butter_scores_pass1
     global butter_scores_pass2
     global chunk_cvvdp_scores
@@ -1938,7 +1944,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
     else:
         if phase == 'cvvdp_probing':
             qadjust_original_file = qadjust_original_file.replace(".avs", "_probe.avs")
-        tasks = [(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, phase, cvvdp_model, cvvdp_config)
+        tasks = [(chunk, name, ext, qadjust_original_file, skip, video_matrix, video_transfer, video_primaries, chroma_location, phase, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay)
                  for chunk in chunklist if chunk['credits'] == 0]
 
         total_metric_scores = []
@@ -2089,7 +2095,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "chunks": qadjust_data["chunks"]
         }
     elif qadjust_mode == 3:
-        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
+        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, local_slope)
         new_crf_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
         scale_by_chunk = {row['chunk']: row['scale'] for row in new_crfs}
         base_crf_by_chunk = {row['chunk']: row['q_undamped'] for row in new_crfs}
@@ -2110,6 +2116,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
                 "cvvdp_score": float(score_by_chunk[chunk_number]),
                 "average_luma": float(luma_by_chunk[chunk_number]),
                 "luma_scale": float(scale_by_chunk[chunk_number]),
+                "local_slope": int(local_slope),
                 "undamped_Q": base_crf_by_chunk[chunk_number],
                 "adjusted_Q": new_q
             })
@@ -2236,68 +2243,49 @@ def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_tar
     return crfs
 
 
-def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer):
+def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, local_slope):
     """
     Adjust per-chunk CRF based on CVVDP scores, with perceptual protection
     against over-compression in dark scenes using chunk-average luma.
 
-    Core principles:
-      - CVVDP controls Q adjustments globally.
-      - Raising Q (more compression) is selectively damped in dark scenes.
-      - Lowering Q (less compression) is never damped.
-      - SDR and HDR use different luma response curves.
-      - Luma is chunk-average, not frame-based.
+    local_slope = 0:
+        Piecewise linear slope (original behavior)
 
-    Parameters:
-        chunk_cvvdp_scores : list of dict
-            [{'chunk': int, 'score': float, 'average_luma': float}, ...]
-        cvvdp_q : float
-            Reference CRF used during CVVDP analysis pass.
-        qadjust_target : float
-            Target CVVDP score.
-        cvvdp_curve : list of dict
-            Probe curve mapping CRF to CVVDP score [{'q': Q, 'score': S}, ...]
-        cvvdp_min_luma : float
-            Below this luma, raising Q is fully suppressed.
-        cvvdp_max_luma : float
-            At and above this luma, full CVVDP-based Q raising is allowed.
-        qadjust_min_q : float
-            Absolute CRF clamp (minimum).
-        qadjust_max_q : float
-            Absolute CRF clamp (maximum).
-        video_transfer : int
-            Transfer characteristic. 16 = HDR (PQ), otherwise SDR.
-
-    Returns:
-        list of dict
-            [{'chunk': int, 'scale': float, 'q_undamped': float, 'q': float}, ...]
+    local_slope = 1:
+        Smooth local derivative using monotone cubic (PCHIP)
     """
 
-    # --- sort probe curve by Q ---
     cvvdp_curve = sorted(cvvdp_curve, key=lambda x: x['q'])
 
-    # --- estimate local slope around cvvdp_q ---
-    for a, b in zip(cvvdp_curve, cvvdp_curve[1:]):
-        if a['q'] <= cvvdp_q <= b['q']:
+    # --- estimate slope around cvvdp_q ---
+    if local_slope == 0:
+        for a, b in zip(cvvdp_curve, cvvdp_curve[1:]):
+            if a['q'] <= cvvdp_q <= b['q']:
+                slope = (b['score'] - a['score']) / (b['q'] - a['q'])
+                break
+        else:
+            a, b = cvvdp_curve[-2], cvvdp_curve[-1]
             slope = (b['score'] - a['score']) / (b['q'] - a['q'])
-            break
     else:
-        # fallback: use last segment
-        a, b = cvvdp_curve[-2], cvvdp_curve[-1]
-        slope = (b['score'] - a['score']) / (b['q'] - a['q'])
+        slope = estimate_local_slope_pchip(cvvdp_curve, cvvdp_q)
+
+    # --- slope safety clamp ---
+    eps = 1e-6
+    if abs(slope) < eps:
+        slope = -eps if slope < 0 else eps
 
     chunk_qs = []
 
     # perceptual tuning constants
-    log_k_hdr = 10.0   # HDR: strong protection near black
-    gamma_sdr = 1.7    # SDR: softer ramp
+    log_k_hdr = 10.0
+    gamma_sdr = 1.7
 
     for row in chunk_cvvdp_scores:
         chunk = row['chunk']
         s_i = row['score']
         average_luma = row.get('average_luma', 0.005)
 
-        # --- base CVVDP-derived delta Q ---
+        # --- base CVVDP-derived delta Q (Newton step) ---
         delta_q = -(s_i - qadjust_target) / slope
         q_base = cvvdp_q + delta_q
 
@@ -2306,17 +2294,14 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
             if average_luma <= cvvdp_min_luma:
                 luma_scale = 0.0
             elif average_luma < cvvdp_max_luma:
-                # Normalize luma into [0,1]
                 x = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
                 if video_transfer == 16:
-                    # HDR: logarithmic ramp
                     luma_scale = math.log1p(log_k_hdr * x) / math.log1p(log_k_hdr)
                 else:
-                    # SDR: power ramp
                     luma_scale = x ** gamma_sdr
             else:
-                # Full Q raising allowed
                 luma_scale = 1.0
+
             delta_q *= luma_scale
         else:
             luma_scale = 1.0
@@ -2324,11 +2309,11 @@ def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, c
         # --- apply adjustment ---
         q_i = cvvdp_q + delta_q
 
-        # --- quantize to quarter-step CRF ---
+        # --- quantize ---
         q_i = round(q_i * 4) / 4
         q_base = round(q_base * 4) / 4
 
-        # --- clamp to allowed range ---
+        # --- clamp ---
         q_i = max(qadjust_min_q, min(qadjust_max_q, q_i))
         q_base = max(qadjust_min_q, min(qadjust_max_q, q_base))
 
@@ -2382,8 +2367,7 @@ def show_qs(chunklist, reuse_qadjust):
         return weighted_crf
 
 
-def generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q):
-    gamma = 1.4
+def generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma=1.4):
     qs = []
     for i in range(probes):
         t = i / (probes - 1)
@@ -2418,56 +2402,558 @@ def estimate_analysis_q(cvvdp_curve, qadjust_target):
         return int(probe_results[-1]['q'])
 
 
-def fit_into_4k(video_width, video_height, output_width = 3840, output_height = 2160):
-    """
-    Compute the final resolution when scaling a source frame to fit inside a 4K box
-    (default 3840x2160) while preserving aspect ratio.
+def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, video_length, fr, max_parallel_encodes, probe_chunklist_dict, reuse_qadjust, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br,
+                     qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma,
+                     cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, probing_log_file):
+    qadjust_cycle = 1
+    for probe_q in probe_qs[:probes]:
+        for _, enc_cmd, _ in probe_encode_commands:
+            for i, arg in enumerate(enc_cmd):
+                if arg.startswith('--crf'):
+                    enc_cmd[i] = f'--crf {probe_q}'
+                    break
+        logger.info(f'Probing Q: {probe_q}')
+        print(f'\nProbing Q: {probe_q}')
+        run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+        score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                  qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
+                                  cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
 
-    Guarantees:
-      - output_w <= output_width and output_h <= output_height
-      - at least one of (output_w == output_width) or (output_h == output_height) holds,
-        unless allow_upscale=False and the source is already smaller than the box.
+        cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
-    Notes:
-      - Uses floor for the non-limiting dimension to avoid exceeding the box due to rounding.
-      - If even=True, makes dimensions even by rounding down (common encoder requirement).
-    """
-    allow_upscale = True
-    even = True
-
-    if video_width <= 0 or video_height <= 0:
-        raise ValueError(f"Source dimensions must be positive, got {video_width}x{video_height}")
-
-    scale_w = output_width / video_width
-    scale_h = output_height / video_height
-    scale = min(scale_w, scale_h)
-
-    if not allow_upscale:
-        scale = min(scale, 1.0)
-
-    # Choose which side "hits" first, then compute the other by flooring.
-    if scale == scale_w and (allow_upscale or scale_w <= 1.0):
-        out_w = output_width if scale != 1.0 else video_width
-        out_h = int(video_height * (out_w / video_width))
-    else:
-        out_h = output_height if scale != 1.0 else video_height
-        out_w = int(video_width * (out_h / video_height))
-
-    if even:
-        # Keep the limiting dimension intact (3840/2160 are already even).
-        if out_w == output_width:
-            out_h -= out_h % 2
-        elif out_h == output_height:
-            out_w -= out_w % 2
+    cvvdp_curve.sort(key=lambda r: r["q"])
+    for i, r in enumerate(cvvdp_curve):
+        if i == 0:
+            r["slope"] = None
+            r["delta_score"] = None
+            r["delta_bitrate"] = None
+            r["kbps_per_0_1_cvvdp"] = None
         else:
-            # allow_upscale=False case (no scaling): just evenize both safely.
-            out_w -= out_w % 2
-            out_h -= out_h % 2
+            prev = cvvdp_curve[i - 1]
 
-        out_w = max(2, out_w)
-        out_h = max(2, out_h)
+            d_score = r["score"] - prev["score"]
+            d_br = r["avg_bitrate"] - prev["avg_bitrate"]
 
-    return out_w, out_h
+            r["delta_score"] = d_score
+            r["delta_bitrate"] = d_br
+
+            # internal slope (used for knee logic)
+            if d_br == 0:
+                r["slope"] = None
+            else:
+                r["slope"] = d_score / d_br
+
+            # user-facing efficiency metric
+            if d_score == 0:
+                r["kbps_per_0_1_cvvdp"] = None
+            else:
+                r["kbps_per_0_1_cvvdp"] = abs(d_br) / (abs(d_score) * 10)
+
+    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, "advanced")
+    confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+    logger.info(f"Detected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+    print(f"\nDetected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+    probe_ref_qs = add_refinement_probes(cvvdp_curve, knee_i)
+    for probe_q in probe_ref_qs:
+        for _, enc_cmd, _ in probe_encode_commands:
+            for i, arg in enumerate(enc_cmd):
+                if arg.startswith('--crf'):
+                    enc_cmd[i] = f'--crf {probe_q}'
+                    break
+        logger.info(f'Refinement probing Q: {probe_q}')
+        print(f'\nRefinement probing Q: {probe_q}')
+        run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+        score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                  qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
+                                  cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+
+        cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+    cvvdp_curve.sort(key=lambda r: r["q"])
+    # Recompute bitrate-aware slopes
+    for i, r in enumerate(cvvdp_curve):
+        if i == 0:
+            r["slope"] = None
+            r["delta_score"] = None
+            r["delta_bitrate"] = None
+            r["kbps_per_0_1_cvvdp"] = None
+        else:
+            prev = cvvdp_curve[i - 1]
+
+            d_score = r["score"] - prev["score"]
+            d_br = r["avg_bitrate"] - prev["avg_bitrate"]
+
+            r["delta_score"] = d_score
+            r["delta_bitrate"] = d_br
+
+            # internal slope (used for knee logic)
+            if d_br == 0:
+                r["slope"] = None
+            else:
+                r["slope"] = d_score / d_br
+
+            # user-facing efficiency metric
+            if d_score == 0:
+                r["kbps_per_0_1_cvvdp"] = None
+            else:
+                r["kbps_per_0_1_cvvdp"] = abs(d_br) / (abs(d_score) * 10)
+
+    fieldnames = sorted({key for row in cvvdp_curve for key in row.keys()})
+    with open(probing_log_file, "w", newline="") as f:
+        f.write(f"{probe_qs}\n")
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(cvvdp_curve)
+
+    return cvvdp_curve, qadjust_cycle
+
+
+def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file):
+    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, "advanced")
+    confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+    logger.info(f"Detected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+    print(f"\nDetected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+    q_width = max(len(str(r['q'])) for r in cvvdp_curve)
+    q_width = max(q_width, len("q"))
+
+    bitrate_width = max(len(f"{r['avg_bitrate']:.2f}") for r in cvvdp_curve)
+    bitrate_width = max(bitrate_width, len("avg_bitrate"))
+
+    score_width = max(len(f"{r['score']:.6f}") for r in cvvdp_curve)
+    score_width = max(score_width, len("score"))
+
+    slope_width = max(
+        len(f"{r['slope']:.6f}") if r['slope'] is not None else len("None")
+        for r in cvvdp_curve
+    )
+    slope_width = max(slope_width, len("slope"))
+
+    # Header and line formats
+    header_fmt = (
+        f"{{:>{q_width}}}  "
+        f"{{:>{bitrate_width}}}  "
+        f"{{:>{score_width}}}  "
+        f"{{:>{slope_width}}}"
+    )
+
+    line_fmt = (
+        f"{{:>{q_width}}}  "
+        f"{{:>{bitrate_width}.2f}}  "
+        f"{{:>{score_width}.6f}}  "
+        f"{{:>{slope_width}}}"
+    )
+
+    # Separator (3 gaps between 4 columns = 6 spaces total)
+    separator = "-" * (q_width + bitrate_width + score_width + slope_width + 6)
+
+    # Print
+    header = header_fmt.format("q", "avg_bitrate", "score", "slope")
+    print(header)
+    print(separator)
+
+    for r in cvvdp_curve:
+        slope_str = f"{r['slope']:.6f}" if r["slope"] is not None else "None"
+        line = line_fmt.format(r['q'], r['avg_bitrate'], r['score'], slope_str)
+
+        if knee_row is not None and r["q"] == knee_row["q"]:
+            line += "  <== KNEE"
+
+        print(line)
+
+    if knee_i is not None:
+        q_knee = knee_row["q"]
+
+        left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
+        right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
+
+        print("\n==== CRF DECISION EXPLANATION ====")
+        print(f"Detected knee at Q{q_knee}")
+
+        if left:
+            print(
+                f"Below knee (Q{left['q']} → Q{q_knee}):  "
+                f"{knee_row['delta_score']:+.3f} CVVDP for "
+                f"{knee_row['delta_bitrate']:+.0f} kbps  →  "
+                f"{fmt(knee_row['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP"
+            )
+
+        if right:
+            print(
+                f"Above knee (Q{q_knee} → Q{right['q']}):  "
+                f"{right['delta_score']:+.3f} CVVDP for "
+                f"{right['delta_bitrate']:+.0f} kbps  →  "
+                f"{fmt(right['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP"
+            )
+
+        print("=================================")
+    print_cvvdp_curve_data_to_file(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text)
+
+
+def print_cvvdp_curve_data_to_file(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text):
+    # Select output sink
+    ctx = open(cvvdp_table_file, "w", encoding="utf-8")
+    with ctx as f:
+        write = f.write
+
+        write(f"\nDetected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
+
+        q_width = max(len(str(r['q'])) for r in cvvdp_curve)
+        q_width = max(q_width, len("q"))
+
+        bitrate_width = max(len(f"{r['avg_bitrate']:.2f}") for r in cvvdp_curve)
+        bitrate_width = max(bitrate_width, len("avg_bitrate"))
+
+        score_width = max(len(f"{r['score']:.6f}") for r in cvvdp_curve)
+        score_width = max(score_width, len("score"))
+
+        slope_width = max(
+            len(f"{r['slope']:.6f}") if r['slope'] is not None else len("None")
+            for r in cvvdp_curve
+        )
+        slope_width = max(slope_width, len("slope"))
+
+        header_fmt = (
+            f"{{:>{q_width}}}  "
+            f"{{:>{bitrate_width}}}  "
+            f"{{:>{score_width}}}  "
+            f"{{:>{slope_width}}}"
+        )
+
+        line_fmt = (
+            f"{{:>{q_width}}}  "
+            f"{{:>{bitrate_width}.2f}}  "
+            f"{{:>{score_width}.6f}}  "
+            f"{{:>{slope_width}}}"
+        )
+
+        separator = "-" * (q_width + bitrate_width + score_width + slope_width + 6)
+
+        header = header_fmt.format("q", "avg_bitrate", "score", "slope")
+        write(header + "\n")
+        write(separator + "\n")
+
+        for r in cvvdp_curve:
+            slope_str = f"{r['slope']:.6f}" if r["slope"] is not None else "None"
+            line = line_fmt.format(r['q'], r['avg_bitrate'], r['score'], slope_str)
+
+            if knee_row is not None and r["q"] == knee_row["q"]:
+                line += "  <== KNEE"
+
+            write(line + "\n")
+
+        if knee_i is not None:
+            q_knee = knee_row["q"]
+            left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
+            right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
+
+            write("\n==== CRF DECISION EXPLANATION ====\n")
+            write(f"Detected knee at Q{q_knee}\n")
+
+            if left:
+                write(
+                    f"Below knee (Q{left['q']} → Q{q_knee}):  "
+                    f"{knee_row['delta_score']:+.3f} CVVDP for "
+                    f"{knee_row['delta_bitrate']:+.0f} kbps  →  "
+                    f"{fmt(knee_row['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP\n"
+                )
+
+            if right:
+                write(
+                    f"Above knee (Q{q_knee} → Q{right['q']}):  "
+                    f"{right['delta_score']:+.3f} CVVDP for "
+                    f"{right['delta_bitrate']:+.0f} kbps  →  "
+                    f"{fmt(right['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP\n"
+                )
+
+            write("=================================\n")
+
+
+def detect_knee_by_curvature(cvvdp_curve, mode="advanced"):
+    """
+    Detects the knee in the CVVDP score vs bitrate curve (bitrate-aware).
+    The knee corresponds to the point where adding bits gives minimal score improvement.
+
+    Parameters:
+        cvvdp_curve: list of dicts with keys 'q', 'score', 'avg_bitrate', 'slope'
+        mode: "basic" (largest slope drop) or "advanced" (largest curvature in slope)
+
+    Returns:
+        (knee_index, knee_row) or (None, None)
+    """
+    if len(cvvdp_curve) < 3:
+        return None, None
+
+    # Ensure ordered by Q
+    curve = sorted(cvvdp_curve, key=lambda r: r["q"])
+
+    # --- compute bitrate-based slopes if missing ---
+    for i in range(1, len(curve)):
+        prev = curve[i - 1]
+        curr = curve[i]
+        db = curr["avg_bitrate"] - prev["avg_bitrate"]
+        if db == 0:
+            curr["slope"] = None
+        else:
+            curr["slope"] = (curr["score"] - prev["score"]) / db
+
+    best_i = None
+    best_metric = None
+
+    for i in range(1, len(curve) - 2):  # avoid tail acceleration
+        s_prev = curve[i - 1]["slope"]
+        s_curr = curve[i]["slope"]
+
+        if s_prev is None or s_curr is None:
+            continue
+
+        if mode == "basic":
+            metric = abs(s_curr)
+        else:  # advanced
+            metric = abs(s_curr - s_prev)
+
+        if best_metric is None or metric > best_metric:
+            best_metric = metric
+            best_i = i
+
+    if best_i is None:
+        return None, None
+
+    return best_i, curve[best_i]
+
+
+def compute_knee_confidence(cvvdp_curve, knee_i):
+    """
+    Returns a dimensionless confidence score for the detected knee.
+    Higher = clearer knee.
+    """
+    if knee_i is None or knee_i <= 0:
+        return None
+
+    curve = sorted(cvvdp_curve, key=lambda r: r["q"])
+
+    curvatures = []
+    for i in range(1, len(curve)):
+        s_prev = curve[i - 1].get("slope")
+        s_curr = curve[i].get("slope")
+        if s_prev is None or s_curr is None:
+            continue
+        curvatures.append(abs(s_curr - s_prev))
+
+    if not curvatures:
+        return None
+
+    knee_curvature = abs(
+        curve[knee_i]["slope"] - curve[knee_i - 1]["slope"]
+    )
+
+    # robust baseline
+    curvatures_sorted = sorted(curvatures)
+    median_curvature = curvatures_sorted[len(curvatures_sorted) // 2]
+
+    if median_curvature <= 1e-12:
+        return None
+
+    confidence_score = knee_curvature / median_curvature
+
+    if confidence_score is None:
+        confidence_text = "N/A"
+    elif confidence_score < 1.2:
+        confidence_text = "weak"
+    elif confidence_score < 1.8:
+        confidence_text = "moderate"
+    elif confidence_score < 2.5:
+        confidence_text = "clear"
+    else:
+        confidence_text = "strong"
+
+    return confidence_score, confidence_text
+
+
+def add_refinement_probes(curve, knee_i):
+    """
+    Pick up to TWO refinement probes: one on each side of the knee,
+    if spacing allows. Bitrate-aware knee detection already done.
+    """
+
+    if knee_i is None:
+        return []
+
+    curve = sorted(curve, key=lambda r: r["q"])
+    n = len(curve)
+
+    if knee_i <= 0 or knee_i >= n - 1:
+        return []
+
+    q_left = curve[knee_i - 1]["q"]
+    q_knee = curve[knee_i]["q"]
+    q_right = curve[knee_i + 1]["q"]
+
+    new_qs = []
+
+    # --- midpoint left ---
+    if abs(q_knee - q_left) >= 2:
+        ql = (q_left + q_knee) // 2
+        if ql not in (q_left, q_knee):
+            new_qs.append(ql)
+
+    # --- midpoint right ---
+    if abs(q_right - q_knee) >= 2:
+        qr = (q_knee + q_right) // 2
+        if qr not in (q_knee, q_right):
+            new_qs.append(qr)
+
+    return new_qs
+
+
+def suggest_q_and_target_cvvdp(cvvdp_curve, knee_mode, bias):
+    """
+    Suggest a final Q and estimate the resulting CVVDP score and average bitrate.
+
+    Parameters:
+        cvvdp_curve : list of dicts
+            Each dict must contain 'q', 'score', and 'avg_bitrate'.
+        knee_mode : str
+            "basic" or "advanced" knee detection.
+        bias : int
+            Offset applied to knee Q to suggest slightly lower or higher Q.
+            Typically -1 or +1.
+
+    Returns:
+        suggested_q : int
+        estimated_score : float
+        estimated_avg_bitrate : float
+    """
+    if not cvvdp_curve:
+        return None, None, None
+
+    # Sort by Q
+    curve = sorted(cvvdp_curve, key=lambda r: r["q"])
+
+    # Detect knee
+    knee_i, knee_row = detect_knee_by_curvature(curve, mode=knee_mode)
+
+    # Compute suggested Q
+    if knee_i is None:
+        # Fallback: midpoint of curve
+        suggested_q = (curve[0]["q"] + curve[-1]["q"]) // 2
+    else:
+        suggested_q = int(knee_row["q"] + bias)
+        # Clamp to min/max Q
+        suggested_q = max(curve[0]["q"], min(curve[-1]["q"], suggested_q))
+
+    # Exact probe match
+    for r in curve:
+        if r["q"] == suggested_q:
+            return suggested_q, float(r["score"]), float(r["avg_bitrate"])
+
+    # --- Interpolation setup ---
+    xs = [r["q"] for r in curve]
+    ys_score = [r["score"] for r in curve]
+    ys_bitrate = [r["avg_bitrate"] for r in curve]
+
+    # Compute PCHIP slopes
+    ms_score = pchip_slopes(xs, ys_score)
+    ms_bitrate = pchip_slopes(xs, ys_bitrate)
+
+    # Interpolate at suggested Q
+    est_score = pchip_interpolate(xs, ys_score, ms_score, suggested_q)
+    est_bitrate = pchip_interpolate(xs, ys_bitrate, ms_bitrate, suggested_q)
+
+    return suggested_q, float(est_score), float(est_bitrate)
+
+
+def pchip_slopes(xs, ys):
+    """
+    Compute monotone PCHIP slopes for points (xs, ys).
+    Returns list of tangents m[i].
+    """
+    n = len(xs)
+    h = [xs[i+1] - xs[i] for i in range(n - 1)]
+    delta = [(ys[i+1] - ys[i]) / h[i] for i in range(n - 1)]
+
+    m = [0.0] * n
+
+    # Endpoints: one-sided
+    m[0] = delta[0]
+    m[-1] = delta[-1]
+
+    # Interior points
+    for i in range(1, n - 1):
+        if delta[i - 1] * delta[i] <= 0:
+            m[i] = 0.0
+        else:
+            w1 = 2 * h[i] + h[i - 1]
+            w2 = h[i] + 2 * h[i - 1]
+            m[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i])
+
+    return m
+
+
+def pchip_interpolate(xs, ys, ms, x):
+    """
+    Interpolate y at x using precomputed PCHIP slopes.
+    """
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+
+    for i in range(len(xs) - 1):
+        if xs[i] <= x <= xs[i + 1]:
+            h = xs[i + 1] - xs[i]
+            t = (x - xs[i]) / h
+
+            h00 = (2 * t**3 - 3 * t**2 + 1)
+            h10 = (t**3 - 2 * t**2 + t)
+            h01 = (-2 * t**3 + 3 * t**2)
+            h11 = (t**3 - t**2)
+
+            return (
+                h00 * ys[i]
+                + h10 * h * ms[i]
+                + h01 * ys[i + 1]
+                + h11 * h * ms[i + 1]
+            )
+
+    # Fallback (should not hit)
+    return ys[-1]
+
+
+def estimate_local_slope_pchip(cvvdp_curve, cvvdp_q):
+    curve = sorted(cvvdp_curve, key=lambda r: r["q"])
+    xs = [r["q"] for r in curve]
+    ys = [r["score"] for r in curve]
+
+    ms = pchip_slopes(xs, ys)
+
+    if cvvdp_q <= xs[0]:
+        return ms[0]
+    if cvvdp_q >= xs[-1]:
+        return ms[-1]
+
+    for i in range(len(xs) - 1):
+        if xs[i] <= cvvdp_q <= xs[i + 1]:
+            h = xs[i + 1] - xs[i]
+            t = (cvvdp_q - xs[i]) / h
+
+            # derivative of Hermite basis
+            dh00 = (6 * t**2 - 6 * t) / h
+            dh10 = (3 * t**2 - 4 * t + 1)
+            dh01 = (-6 * t**2 + 6 * t) / h
+            dh11 = (3 * t**2 - 2 * t)
+
+            return (
+                dh00 * ys[i]
+                + dh10 * ms[i]
+                + dh01 * ys[i + 1]
+                + dh11 * ms[i + 1]
+            )
+
+    return ms[-1]
+
+
+def fmt(v):
+    return f"{v:.0f}" if v is not None else "n/a"
 
 
 def terminate_all_processes():
@@ -2525,16 +3011,19 @@ def main():
     parser.add_argument('--qadjust-b', nargs='?', default=-0.5, type=float)
     parser.add_argument('--qadjust-c', nargs='?', default=0.25, type=float)
     parser.add_argument('--qadjust-skip', nargs='?', type=int)
-    parser.add_argument('--qadjust-cpu', nargs='?', default=7, type=int)
+    parser.add_argument('--qadjust-cpu', nargs='?', default=8, type=int)
     parser.add_argument('--qadjust-workers', nargs='?', type=str)
     parser.add_argument('--qadjust-target', nargs='?', type=float)
-    parser.add_argument('--qadjust-min-q', nargs='?', default=15.0, type=float)
-    parser.add_argument('--qadjust-max-q', nargs='?', default=35.0, type=float)
+    parser.add_argument('--qadjust-min-q', nargs='?', default=20, type=int)
+    parser.add_argument('--qadjust-max-q', nargs='?', default=35, type=int)
+    parser.add_argument('--cvvdp-bias', nargs='?', default=0, type=int)
     parser.add_argument('--cvvdp-min-luma', nargs='?', type=float)
     parser.add_argument('--cvvdp-max-luma', nargs='?', type=float)
     parser.add_argument('--probes', nargs='?', type=int)
     parser.add_argument('--cvvdp-model', nargs='?', type=str)
     parser.add_argument('--cvvdp-config', nargs='?', type=str)
+    parser.add_argument('--cvvdp-resizetodisplay', action='store_true')
+    parser.add_argument('--cvvdp-probing-only', action='store_true')
 
     # Command-line arguments
     args = parser.parse_args()
@@ -2579,11 +3068,14 @@ def main():
     qadjust_target = args.qadjust_target
     qadjust_min_q = args.qadjust_min_q
     qadjust_max_q = args.qadjust_max_q
+    cvvdp_bias = args.cvvdp_bias
     cvvdp_min_luma = args.cvvdp_min_luma
     cvvdp_max_luma = args.cvvdp_max_luma
     probes = args.probes
     cvvdp_model = args.cvvdp_model
     cvvdp_config = args.cvvdp_config
+    cvvdp_resizetodisplay = args.cvvdp_resizetodisplay
+    cvvdp_probing_only = args.cvvdp_probing_only
     extracl_dict = {}
     dovicl_dict = {}
 
@@ -2788,13 +3280,30 @@ def main():
         cvvdp_min_luma = 0.00035
     if not cvvdp_max_luma:
         cvvdp_max_luma = 0.0025
-    if not probes:
-        if qadjust_max_q - qadjust_min_q >= 20:
-            probes = 8
-        elif 20 > qadjust_max_q - qadjust_min_q >= 15:
-            probes = 7
+    if qadjust and qadjust_mode == 3:
+        if not probes:
+            if qadjust_max_q - qadjust_min_q >= 20:
+                probes = 7
+                gamma = 1.0
+            elif 20 > qadjust_max_q - qadjust_min_q >= 15:
+                probes = 6
+                gamma = 1.2
+            else:
+                probes = 5
+                gamma = 1.4
+        elif probes >= 7:
+            gamma = 1.0
+        elif probes == 6:
+            gamma = 1.2
+        elif probes == 5:
+            gamma = 1.4
         else:
+            logger.info("Number of probes set to 5.")
+            print("Number of probes set to 5.")
             probes = 5
+            gamma = 1.4
+    if not qadjust_target:
+        qadjust_target = 0
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -3013,11 +3522,36 @@ def main():
     qadjust_results_file = os.path.join(output_folder, f"{output_name}_qadjust.json")
     qadjust_data = {}
     reuse_qadjust = False
+    cvvdp_csv_exists = False
     if qadjust_only:
         qadjust_reuse = False
 
+    if qadjust_mode == 3:
+        probing_log_file = os.path.join(output_folder, "cvvdp_probing_log.csv")
+        scriptdir = os.path.dirname(os.path.realpath(__file__))
+        presetpath = os.path.join(scriptdir, 'presets.ini')
+        config = configparser.ConfigParser()
+        try:
+            config.read(presetpath)
+        except Exception as e:
+            logger.error(f"Presets.ini could not be found from the script directory. Exception code {e}")
+            print("\nPresets.ini could not be found from the script directory, exiting..\n")
+            sys.exit(1)
+        try:
+            local_slope = config['cvvdp']['local_slope']
+        except Exception as e:
+            logger.warning(f"CVVDP parameter local_slope could not be found from the preset file. Exception code {e}")
+            print("\nCVVDP parameter local_slope was not found in the preset file, defaulting to 'disabled'.")
+            local_slope = 0 # default to disabling local slope for CVVDP based qadjust
+    else:
+        local_slope = 1
+
     # Clean up the target folder if it already exists, keep data from the qadjust analysis file if requested
     if os.path.exists(output_folder_name) and not sample_start_frame and not sample_end_frame and not create_graintable:
+        if os.path.exists(probing_log_file):
+            cvvdp_csv_exists = True
+            with open(probing_log_file, "r", newline="") as f:
+                cvvdp_csv_lines = f.readlines()
         if os.path.exists(qadjust_results_file):
             if qadjust_reuse:
                 qadjust_cycle = -1
@@ -3034,13 +3568,16 @@ def main():
                         if 'min_chunk_length' in qadjust_data and qadjust_data['min_chunk_length'] != min_chunk_length:
                             print("The current minimum chunk length does not match the qadjust JSON data file, you must rerun the analysis.")
                             sys.exit(0)
-                        if not qadjust_target:
+                        if qadjust_target == 0:
                             while True:
                                 try:
                                     if qadjust_mode == 2:
                                         qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
                                     elif qadjust_mode == 3:
-                                        qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
+                                        qadjust_target = qadjust_data['target']
+                                        logger.info(f"Using qadjust target score {qadjust_target} from the existing data file.")
+                                        print(f"Using qadjust target score {qadjust_target} from the existing data file.")
+                                        # qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
                                     break
                                 except ValueError:
                                     print("Invalid input. Please enter a numeric (float) value.")
@@ -3067,7 +3604,7 @@ def main():
                                 }
                                 for i in qadjust_data['chunks']
                             ]
-                            new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer)
+                            new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, local_slope)
                             new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
                             scale_by_chunk = {i['chunk']: i['scale'] for i in new_crfs}
                             base_q_by_chunk = {i['chunk']: i['q_undamped'] for i in new_crfs}
@@ -3079,6 +3616,7 @@ def main():
                                     "cvvdp_score": chunk['cvvdp_score'],
                                     "average_luma": chunk['average_luma'],
                                     "luma_scale": scale_by_chunk[chunk_number],
+                                    "local_slope": int(local_slope),
                                     "undamped_Q": base_q_by_chunk[chunk_number],
                                     "adjusted_Q": new_q_by_chunk[chunk_number]
                                 }
@@ -3097,15 +3635,28 @@ def main():
     os.makedirs(scripts_folder, exist_ok=True)
     os.makedirs(chunks_folder, exist_ok=True)
 
+    if cvvdp_csv_exists:
+        with open(probing_log_file, "w", newline="") as f:
+            f.writelines(cvvdp_csv_lines)
+
     if qadjust_mode == 3:
         if cvvdp_config is not None:
             with open(cvvdp_config, 'r') as f:
                 config = json.load(f)
             if cvvdp_model not in config:
                 print(f"CVVDP model '{cvvdp_model}' not found in {cvvdp_config}!")
-                logging.error(f"CVVDP model '{cvvdp_model}' not found in {cvvdp_config}!")
+                logger.error(f"CVVDP model '{cvvdp_model}' not found in {cvvdp_config}!")
                 sys.exit(1)
-
+            if not cvvdp_resizetodisplay:
+                model_data = config[cvvdp_model].copy()
+                model_data["resolution"] = [int(video_width), int(video_height)]
+                new_config = {
+                    cvvdp_model: model_data
+                }
+                cvvdp_config_file = os.path.join(output_folder, f"cvvdp_config.json")
+                with open(cvvdp_config_file, "w") as f:
+                    json.dump(new_config, f, indent=4)
+                cvvdp_config = cvvdp_config_file
     encode_log_file = os.path.join(output_folder, f"encode_log.txt")
     file_handler = logging.FileHandler(encode_log_file, mode="w", encoding="utf-8")
     file_handler.setFormatter(formatter)
@@ -3257,10 +3808,10 @@ def main():
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode,
                                               qadjust_cpu, cpu, qadjust_target,avg_bitrate, 0,'ssimu2', min_chunk_length, minkeyint, [], 0, 0, 0, qadjust_min_q,
-                                              qadjust_max_q, cvvdp_model, cvvdp_config)
+                                              qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
             # mode 2 = Butteraugli with two passes
             elif qadjust_mode == 2:
-                if not qadjust_target:
+                if qadjust_target == 0:
                     while True:
                         try:
                             qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
@@ -3292,7 +3843,7 @@ def main():
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass1_.hevc")
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1,'butter_pass1', min_chunk_length, minkeyint, [], 0,
-                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
+                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
                 modified_encode_commands = []
 
                 filtered_chunks = [c for c in chunklist if c.get("credits", 0) != 1]
@@ -3320,57 +3871,83 @@ def main():
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass2_.hevc")
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1,'butter_pass2', min_chunk_length, minkeyint, [], 0,
-                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
+                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
             # CVVDP
             else:
-                if not qadjust_target:
-                    while True:
-                        try:
-                            qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
-                            break
-                        except ValueError:
-                            print("Invalid input. Please enter a numeric (float) value.")
-
                 logger.info("Started analysis using CVVDP.")
                 print("Started analysis using CVVDP.")
 
                 cvvdp_curve = []
-                probe_round = 1
-                probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q)
-                probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file,
-                                                                                                                      video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, probe_length)
-                encode_params_displist = " ".join(encode_params)
-                encode_params_displist = encode_params_displist.replace('  ', ' ')
-                encode_params_displist = encode_params_displist.replace(f' --crf 0', '')
-                if encoder != 'x265':
-                    output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.ivf")
+                if os.path.exists(probing_log_file):
+                    with open(probing_log_file, "r", newline="") as f:
+                        probes_line = f.readline().strip()
+                        reader = csv.DictReader(f)  # line 2 is header
+                        rows = list(reader) # raw data
+                    for r in rows:
+                        cvvdp_curve.append({
+                            "q": int(r["q"]),
+                            "avg_bitrate": float(r["avg_bitrate"]),
+                            "score": float(r["score"]),
+                            "slope": None if r["slope"] == '' else float(r["slope"]),
+                            "delta_bitrate": None if r["delta_bitrate"] == '' else float(r["delta_bitrate"]),
+                            "delta_score": None if r["delta_score"] == '' else float(r["delta_score"]),
+                            "kbps_per_0_1_cvvdp": None if r["kbps_per_0_1_cvvdp"] == '' else float(r["kbps_per_0_1_cvvdp"]),
+                        })
+                    logger.info("Read the existing probe CSV file.")
+                    print("Read the existing probe CSV file.")
+                    csv_qs = ast.literal_eval(probes_line)
+                    probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma)
+                    if csv_qs != probe_qs:
+                        logger.error(f"Probe Q mismatch!\nCSV Qs:     {csv_qs}\nScript Qs:  {probe_qs}")
+                        print(f"Probe Q mismatch!\nCSV Qs:     {csv_qs}\nScript Qs:  {probe_qs}\n")
+                        print(f"Please delete the file {probing_log_file} and launch the script again to continue.")
+                        sys.exit(1)
                 else:
-                    output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.hevc")
-                print("The encoder parameters for the analysis:", encode_params_displist)
-                logger.info(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
-                print(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
-                qadjust_cycle = 1
-                while probe_round <= probes:
-                    probe_q = probe_qs[probe_round - 1]
-                    for _, enc_cmd, _ in probe_encode_commands:
-                        for i, arg in enumerate(enc_cmd):
-                            if arg.startswith('--crf'):
-                                enc_cmd[i] = f'--crf {probe_q}'
-                                break
-                    logger.info(f'Probing Q: {probe_q}')
-                    print(f'\nProbing Q: {probe_q}')
-                    run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
-                    score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
-                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
-                                              cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
+                    probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma)
+                    probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file,
+                                                                                                                          video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, probe_length)
+                    encode_params_displist = " ".join(encode_params)
+                    encode_params_displist = encode_params_displist.replace('  ', ' ')
+                    encode_params_displist = encode_params_displist.replace(f' --crf 0', '')
+                    if encoder != 'x265':
+                        output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.ivf")
+                    else:
+                        output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.hevc")
+                    print("The encoder parameters for the analysis:", encode_params_displist)
+                    logger.info(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
+                    print(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
 
-                    cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
-                    probe_round += 1
+                    cvvdp_curve, qadjust_cycle = run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, video_length, fr, max_parallel_encodes, probe_chunklist_dict, reuse_qadjust, qadjust_skip,
+                                                                  qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                                                  qadjust_mode, qadjust_cpu, cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
+                                                                  cvvdp_resizetodisplay, local_slope, probing_log_file)
+
+                cvvdp_table_file = os.path.join(output_folder, f"{output_name}_cvvdp_table.txt")
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file)
+
+                suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, "advanced", cvvdp_bias)
+                if cvvdp_bias != 0:
+                    logger.info(f"At CRF {suggested_q}, the estimated CVVDP score is {est_score:.4f} and estimated average bitrate {est_bitrate:.2f}.")
+                    print(f"At CRF {suggested_q}, the estimated CVVDP score is {est_score:.4f} and estimated average bitrate {est_bitrate:.2f}.")
+
+                if cvvdp_probing_only:
+                    logger.info("Probing run complete, exiting.")
+                    print("Probing finished successfully.")
+                    sys.exit(0)
 
                 if encoder != 'x265':
                     output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_.ivf")
                 else:
                     output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_.hevc")
+                if qadjust_target == 0:
+                    qadjust_target = est_score
+                """if qadjust_target == 0:
+                    while True:
+                        try:
+                            qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
+                            break
+                        except ValueError:
+                            print("Invalid input. Please enter a numeric (float) value.")"""
                 cvvdp_q = estimate_analysis_q(cvvdp_curve, qadjust_target)
                 logger.info(f"Running a full analysis at Q {cvvdp_q} to adjust Q per chunk using the curve.")
                 print(f"\nRunning a full analysis at Q {cvvdp_q} to adjust Q per chunk using the curve.")
@@ -3395,7 +3972,7 @@ def main():
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time=datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
                                               qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0,'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q,
-                                              cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config)
+                                              cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
 
             if qadjust_only:
                 try:
