@@ -23,6 +23,7 @@ import numpy as np
 import io
 import csv
 import ast
+import statistics
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from datetime import datetime
@@ -421,7 +422,7 @@ def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_wi
         referencefile_start_frame = input("Please enter the first frame of FGS grain table process: ")
         referencefile_end_frame = input("Please enter the last frame of FGS grain table process (default 5 seconds of frames if empty) : ")
 
-        # Check the need to pad the video because grav1synth :/
+        # Check the need to pad the video :/
         # This check and workaround currently supports resolutions only up to 4K
         padleft = 0
         padright = 0
@@ -774,6 +775,8 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
     if qadjust_cycle == 1:
         if encoder == 'svt':
             replacements_list = {'--film-grain ': '--film-grain 0',
+                                 '--photon-noise ': '--photon-noise 0',
+                                 '--noise ': '--noise 0',
                                  '--preset ': f'--preset {qadjust_cpu}',
                                  '--tile-columns ': '--tile-columns 1',
                                  '--tile-rows ': '--tile-rows 0',
@@ -907,6 +910,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                 enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
+                    f"-n {i['length']}",
                     "-b", '"'+output_chunk+'"',
                     "-i -"
                 ]
@@ -915,6 +919,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
                 enc_command = [
                     "svtav1encapp.exe",
                     *encode_params,
+                    f"-n {i['length']}",
                     "-b", '"'+output_chunk+'"',
                     "-i -"
                 ]
@@ -974,7 +979,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
 
 
 def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file, video_width, video_height, qadjust_b,
-                            qadjust_c, scripts_folder, decode_method, probe_length):
+                            qadjust_c, scripts_folder, decode_method, probe_length, cvvdp_probing_skip, video_framerate, cvvdp_probing_length, cvvdp_probing_mode):
     encode_params_original = stored_encode_params.copy()
     encode_params = []
     probe_encode_commands = []
@@ -982,6 +987,8 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
 
     if encoder == 'svt':
         replacements_list = {'--film-grain ': '--film-grain 0',
+                             '--photon-noise ': '--photon-noise 0',
+                             '--noise ': '--noise 0',
                              '--preset ': f'--preset {qadjust_cpu}',
                              '--tile-columns ': '--tile-columns 1',
                              '--tile-rows ': '--tile-rows 0',
@@ -1036,14 +1043,46 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
     source = lines[0]
     cropping = next((line for line in lines if line.strip().lower().startswith('crop(')), None)
 
-    start_frame = int(video_length * 0.05) # skipping the first 5% of the source
-    end_frame = credits_start_frame - 1 if credits_start_frame is not None else video_length - 1 # probing ends before the credits start if defined
+    # --- trim analysis range ---
+    start_frame = int(video_length * cvvdp_probing_skip)  # skip intro
+    end_frame = credits_start_frame - 1 if credits_start_frame is not None else video_length - 1
     trimmed_clip_length = end_frame - start_frame
 
-    probe_ratio = 0.05  # size of total sample (1 = full length)
-    step = int(round(probe_length / probe_ratio)) # how many frames between samples
-    samples = (trimmed_clip_length + step - 1) // step # number of sample chunks
-    probe_clip_length = probe_length * samples # length of the probe clip
+    # --- sampling parameters ---
+    if cvvdp_probing_length:
+        min_fraction = cvvdp_probing_length
+        max_fraction = cvvdp_probing_length
+    elif cvvdp_probing_mode == 'fast':
+        min_fraction = 0.05
+        max_fraction = 0.05
+    else:
+        min_fraction = 0.05
+        max_fraction = 0.08
+
+    # reference length where sampling = 5% (2.5 hours)
+    reference_frames = int(2.5 * 60 * 60 * video_framerate)
+
+    # scale sampling for shorter videos
+    target_fraction = min_fraction * (reference_frames / video_length)
+
+    # clamp sampling fraction
+    target_fraction = max(min_fraction, min(target_fraction, max_fraction))
+
+    # convert to trimmed-region sampling ratio
+    trimmed_fraction = trimmed_clip_length / video_length
+    probe_ratio = min(1.0, target_fraction / trimmed_fraction)
+
+    # --- sample spacing ---
+    step = max(1, int(probe_length / probe_ratio))
+
+    # number of probe segments
+    samples = (trimmed_clip_length + step - 1) // step
+
+    # total probe clip length
+    probe_clip_length = probe_length * samples
+
+    logger.info(f"Sampling {(probe_clip_length / video_length) * 100:.1f}% of video for the CVVDP score.")
+    print(f"Sampling {(probe_clip_length / video_length) * 100:.1f}% of video for the CVVDP score.")
 
     chunk_number = 1
     i = 0
@@ -1120,6 +1159,7 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
             enc_command = [
                 "svtav1encapp.exe",
                 *encode_params,
+                f"-n {i['length']}",
                 "-b", '"'+output_chunk+'"',
                 "-i -"
             ]
@@ -1128,7 +1168,7 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
                 "x265.exe",
                 "--y4m",
                 "--no-progress",
-                f'--frames {i['length']}',
+                f"--frames {i['length']}",
                 *encode_params,
                 "--output", '"'+output_chunk+'"',
                 "--input", "-"
@@ -1662,7 +1702,6 @@ def run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes,
         print("Finished encoding the chunks.\n")
         logger.info(f"Final encode finished, average bitrate {avg_bitrate:.2f} kbps.")
     else:
-        print("Finished encoding the Q analysis chunks.\n")
         logger.info(f"Q analysis encode finished, average bitrate {avg_bitrate:.2f} kbps.")
     logger.info(f"Total encoding time {encoding_time}.")
 
@@ -1671,7 +1710,7 @@ def analyze_butteraugli_chunk(chunk, name, ext, qadjust_original_file, skip, qad
     import vapoursynth as vs
     core = vs.core
     core.max_cache_size = 4096
-    core.num_threads = 2  # workaround to non-deterministic results
+    # core.num_threads = 4
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
     cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=0)
@@ -1713,7 +1752,7 @@ def analyze_ssimu2_chunk(chunk, name, ext, qadjust_original_file, skip, video_ma
     import vapoursynth as vs
     core = vs.core
     core.max_cache_size = 4096
-    core.num_threads = 2  # workaround to non-deterministic results
+    # core.num_threads = 4
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
     cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=0)
@@ -1752,7 +1791,7 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
     import vapoursynth as vs
     core = vs.core
     core.max_cache_size = 4096
-    core.num_threads = 2 # workaround to non-deterministic results
+    # core.num_threads = 4
 
     cut_source_clip = core.avisource.AVIFileSource(fr"{qadjust_original_file}")[chunk['start']:chunk['end'] + 1]
     cut_encoded_clip = core.bs.VideoSource(source=f"{name}{chunk['chunk']}{ext}", cachemode=0, showprogress=0)
@@ -1774,7 +1813,10 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
         result = core.vship.CVVDP(cut_source_clip, cut_encoded_clip, distmap=0, model_name=cvvdp_model, model_config_json=cvvdp_config, resizeToDisplay=1)
 
     frames = cut_source_clip.num_frames
-    score = [frame.props['_CVVDP'] for frame in result.frames()]
+    score = None
+    for i in range(frames):
+        frame = result.get_frame(i)
+        score = frame.props["_CVVDP"]
 
     if phase == 'cvvdp_probing':
         average_luma = 0.0
@@ -1793,20 +1835,22 @@ def analyze_cvvdp_chunk(chunk, name, ext, qadjust_original_file, skip, video_mat
         luma_clip = core.std.Expr(luma_clip, expr=["x 1e-6 max log"])
         stats = luma_clip.std.PlaneStats()
 
-        s = 0.0
-        n = stats.num_frames
+        values = []
         for f in stats.frames():
-            s += f.props["PlaneStatsAverage"]
+            values.append(f.props["PlaneStatsAverage"])
 
+        # log-average over all frames
+        s = sum(values)
+        n = len(values)
         average_luma = math.exp(s / n)
 
-    return chunk['chunk'], score[-1], score[-1] * frames, frames, average_luma, average_luma * frames
+    return chunk['chunk'], score, score * frames, frames, average_luma, average_luma * frames
 
 
 # noinspection PyTypeChecker,PyUnboundLocalVariable
 def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu,
                       cpu, qadjust_target, avg_bitrate, avg_bitrate_qadjust_pass1, phase, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
-                      cvvdp_resizetodisplay, local_slope):
+                      cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost):
     global butter_scores_pass1
     global butter_scores_pass2
     global chunk_cvvdp_scores
@@ -1842,7 +1886,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
         print(f"Original: {source_length} frames, including credits")
         print(f"Analysis pass encode: {analysis_length} frames, credits ignored")
 
-    print(f"Calculating the metrics using skip value {skip}.\n")
+    print(f"Calculating the metrics using skip value {skip}.")
     logger.info(f"Calculating the metrics using skip value {skip}.")
     start_time = datetime.now()
 
@@ -1975,19 +2019,16 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             })
 
         # Final stats
-        # average = float(np.mean(total_metric_scores))
-        total_metric_scores = np.array(total_metric_scores)
-        average = len(total_metric_scores) / np.sum(1.0 / total_metric_scores)
         weighted_average = total_weight / weighted_frames
 
         if phase == 'cvvdp_probing':
-            print(f'CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}')
-            logger.info(f"CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}")
+            print(f'Weighted CVVDP score: {weighted_average:.8f}\n')
+            logger.info(f"Weighted CVVDP score: {weighted_average:.8f}")
             return weighted_average
         else:
             weighted_average_luma = total_weight_luma / weighted_frames
-            print(f'CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.6f}')
-            logger.info(f"CVVDP harmonic mean: {average:.5f}, weighted score: {weighted_average:.5f}, weighted luma: {weighted_average_luma:.6f}")
+            print(f'Weighted CVVDP score: {weighted_average:.8f}, weighted luma: {weighted_average_luma:.6f}\n')
+            logger.info(f"Weighted CVVDP score: {weighted_average:.8f}, weighted luma: {weighted_average_luma:.6f}")
 
     if qadjust_mode == 1:
         qadjust_data = {
@@ -2095,12 +2136,18 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "chunks": qadjust_data["chunks"]
         }
     elif qadjust_mode == 3:
-        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, local_slope)
-        new_crf_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
+        new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, cvvdp_dark_boost)
+        new_q_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
         scale_by_chunk = {row['chunk']: row['scale'] for row in new_crfs}
-        base_crf_by_chunk = {row['chunk']: row['q_undamped'] for row in new_crfs}
+        base_q_by_chunk = {row['chunk']: row['q_undamped'] for row in new_crfs}
+        luma_only_q_by_chunk = {row['chunk']: row['q_luma_only'] for row in new_crfs}
+        raw_q_by_chunk = {row['chunk']: row['q_raw_no_boost'] for row in new_crfs}
+        dark_weight_by_chunk = {row['chunk']: row['dark_weight'] for row in new_crfs}
+        target_boost_pct_by_chunk = {row['chunk']: row['applied_target_boost_pct'] for row in new_crfs}
+        original_target_by_chunk = {row['chunk']: row['original_target'] for row in new_crfs}
+        effective_target_by_chunk = {row['chunk']: row['effective_target'] for row in new_crfs}
         score_by_chunk = {row['chunk']: row['score'] for row in chunk_cvvdp_scores}
-        luma_by_chunk= {row['chunk']: row['average_luma'] for row in chunk_cvvdp_scores}
+        luma_by_chunk = {row['chunk']: row['average_luma'] for row in chunk_cvvdp_scores}
         qadjust_data["chunks"] = []
 
         for chunk in chunklist:
@@ -2108,7 +2155,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
                 continue
 
             chunk_number = chunk['chunk']
-            new_q = new_crf_by_chunk[chunk_number]
+            new_q = new_q_by_chunk[chunk_number]
 
             qadjust_data["chunks"].append({
                 "chunk_number": chunk_number,
@@ -2116,8 +2163,14 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
                 "cvvdp_score": float(score_by_chunk[chunk_number]),
                 "average_luma": float(luma_by_chunk[chunk_number]),
                 "luma_scale": float(scale_by_chunk[chunk_number]),
+                "dark_weight": float(dark_weight_by_chunk[chunk_number]),
+                "applied_target_boost_pct": float(target_boost_pct_by_chunk[chunk_number]),
+                "original_target": float(original_target_by_chunk[chunk_number]),
+                "effective_target": float(effective_target_by_chunk[chunk_number]),
                 "local_slope": int(local_slope),
-                "undamped_Q": base_crf_by_chunk[chunk_number],
+                "raw_Q_no_boost": raw_q_by_chunk[chunk_number],
+                "raw_Q_boosted": base_q_by_chunk[chunk_number],
+                "luma_scaled_Q_no_boost": luma_only_q_by_chunk[chunk_number],
                 "adjusted_Q": new_q
             })
 
@@ -2140,7 +2193,6 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "weighted_crf": weighted_crf,
             "chunks": qadjust_data["chunks"]
         }
-        # sys.exit(0)
 
     chunklist = sorted(chunklist, key=lambda x: x['length'], reverse=True)
 
@@ -2243,84 +2295,125 @@ def adjust_crf_butteraugli(butter_scores_pass1, butter_scores_pass2, qadjust_tar
     return crfs
 
 
-def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, local_slope):
+def adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, cvvdp_dark_boost):
     """
-    Adjust per-chunk CRF based on CVVDP scores, with perceptual protection
-    against over-compression in dark scenes using chunk-average luma.
+    Adjust per-chunk CRF based on CVVDP scores.
 
-    local_slope = 0:
-        Piecewise linear slope (original behavior)
+    Optional behavior:
+    - Dark scenes receive a small CVVDP target boost (max +0.1%).
 
-    local_slope = 1:
-        Smooth local derivative using monotone cubic (PCHIP)
+    Debug outputs include:
+    - effective_target
+    - applied_target_boost_pct
     """
 
     cvvdp_curve = sorted(cvvdp_curve, key=lambda x: x['q'])
 
-    # --- estimate slope around cvvdp_q ---
-    if local_slope == 0:
-        for a, b in zip(cvvdp_curve, cvvdp_curve[1:]):
-            if a['q'] <= cvvdp_q <= b['q']:
-                slope = (b['score'] - a['score']) / (b['q'] - a['q'])
-                break
-        else:
-            a, b = cvvdp_curve[-2], cvvdp_curve[-1]
-            slope = (b['score'] - a['score']) / (b['q'] - a['q'])
-    else:
-        slope = estimate_local_slope_pchip(cvvdp_curve, cvvdp_q)
+    # --- estimate slope around cvvdp_q (always Q-domain) ---
+    slope = estimate_local_slope_pchip(cvvdp_curve, cvvdp_q)
 
     # --- slope safety clamp ---
     eps = 1e-6
     if abs(slope) < eps:
         slope = -eps if slope < 0 else eps
 
+    # --- curve span guard ---
+    curve_min_q = cvvdp_curve[0]['q']
+    curve_max_q = cvvdp_curve[-1]['q']
+    max_delta_q = curve_max_q - curve_min_q
+
     chunk_qs = []
 
-    # perceptual tuning constants
     log_k_hdr = 10.0
     gamma_sdr = 1.7
+    dark_target_boost = 0.002  # +0.2%
 
     for row in chunk_cvvdp_scores:
+
         chunk = row['chunk']
         s_i = row['score']
         average_luma = row.get('average_luma', 0.005)
 
-        # --- base CVVDP-derived delta Q (Newton step) ---
-        delta_q = -(s_i - qadjust_target) / slope
-        q_base = cvvdp_q + delta_q
+        # --- compute luma scale ---
+        if average_luma <= cvvdp_min_luma:
+            luma_scale = 0.0
+        elif average_luma < cvvdp_max_luma:
+            x = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
 
-        # --- luma-based damping only when raising Q ---
-        if delta_q > 0:
-            if average_luma <= cvvdp_min_luma:
-                luma_scale = 0.0
-            elif average_luma < cvvdp_max_luma:
-                x = (average_luma - cvvdp_min_luma) / (cvvdp_max_luma - cvvdp_min_luma)
-                if video_transfer == 16:
-                    luma_scale = math.log1p(log_k_hdr * x) / math.log1p(log_k_hdr)
-                else:
-                    luma_scale = x ** gamma_sdr
-            else:
-                luma_scale = 1.0
-
-            delta_q *= luma_scale
+            if video_transfer == 16:  # HDR
+                luma_scale = math.log1p(log_k_hdr * x) / math.log1p(log_k_hdr)
+            else:  # SDR
+                luma_scale = x ** gamma_sdr
         else:
             luma_scale = 1.0
 
-        # --- apply adjustment ---
+        dark_weight = 1.0 - luma_scale
+
+        # --- apply dark-scene boost if enabled ---
+        if cvvdp_dark_boost:
+            boost_factor = dark_target_boost * dark_weight
+            effective_target = qadjust_target * (1.0 + boost_factor)
+        else:
+            boost_factor = 0.0
+            effective_target = qadjust_target
+
+        # --- Newton step (with boost) ---
+        delta_q = -(s_i - effective_target) / slope
+        delta_q = max(-max_delta_q, min(max_delta_q, delta_q))
+
+        q_base = cvvdp_q + delta_q  # undamped
+
+        # --- damping only when raising Q ---
+        if delta_q > 0:
+            delta_q *= luma_scale
+
         q_i = cvvdp_q + delta_q
+
+        # --- luma-only (no boost) ---
+        delta_q_no_boost = -(s_i - qadjust_target) / slope
+        delta_q_no_boost = max(-max_delta_q, min(max_delta_q, delta_q_no_boost))
+
+        if delta_q_no_boost > 0:
+            delta_q_no_boost *= luma_scale
+
+        q_luma_only = cvvdp_q + delta_q_no_boost
+
+        # --- NEW: raw (no boost, no damping) ---
+        delta_q_raw = -(s_i - qadjust_target) / slope
+        delta_q_raw = max(-max_delta_q, min(max_delta_q, delta_q_raw))
+
+        q_raw_no_boost = cvvdp_q + delta_q_raw
 
         # --- quantize ---
         q_i = round(q_i * 4) / 4
         q_base = round(q_base * 4) / 4
+        q_luma_only = round(q_luma_only * 4) / 4
+        q_raw_no_boost = round(q_raw_no_boost * 4) / 4
 
         # --- clamp ---
         q_i = max(qadjust_min_q, min(qadjust_max_q, q_i))
         q_base = max(qadjust_min_q, min(qadjust_max_q, q_base))
+        q_luma_only = max(qadjust_min_q, min(qadjust_max_q, q_luma_only))
+        q_raw_no_boost = max(qadjust_min_q, min(qadjust_max_q, q_raw_no_boost))
 
         chunk_qs.append({
             'chunk': chunk,
+            'avg_bitrate': row.get('avg_bitrate', None),
+            'score': row.get('score', None),
+            'slope': row.get('slope', None),
+            'delta_bitrate': row.get('delta_bitrate', None),
+            'delta_score': row.get('delta_score', None),
+            'kbps_per_0_1_cvvdp': row.get('kbps_per_0_1_cvvdp', None),
+            'score_smoothed': row.get('score_smoothed', None),
+            'eff_band': row.get('eff_band', ''),
             'scale': luma_scale,
+            'dark_weight': dark_weight,
+            'applied_target_boost_pct': boost_factor * 100.0,
+            'original_target': qadjust_target,
+            'effective_target': effective_target,
+            'q_raw_no_boost': q_raw_no_boost,
             'q_undamped': q_base,
+            'q_luma_only': q_luma_only,
             'q': q_i,
         })
 
@@ -2367,12 +2460,64 @@ def show_qs(chunklist, reuse_qadjust):
         return weighted_crf
 
 
-def generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma=1.4):
+def select_probe_count(qadjust_min_q, qadjust_max_q, min_probes=5, max_probes=10):
+    """
+    Dynamically choose number of CRF probes based on the CRF range.
+
+    Parameters
+    ----------
+    qadjust_min_q : int
+        Minimum CRF
+    qadjust_max_q : int
+        Maximum CRF
+    min_probes : int
+        Minimum number of probes (default 5)
+    max_probes : int
+        Maximum number of probes (default 10)
+
+    Returns
+    -------
+    int
+        Number of probes to generate
+    """
+    crf_span = qadjust_max_q - qadjust_min_q
+    probes = round(min_probes + crf_span / 15)
+    return max(min_probes, min(max_probes, probes))
+
+
+def generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma=1.0):
+    """
+    Generate a CRF probe sequence with gamma-based spacing.
+
+    Parameters:
+        probes: int, number of probe points
+        qadjust_min_q: int, minimum CRF
+        qadjust_max_q: int, maximum CRF
+        gamma: float, gamma exponent (>1 biases low CRFs)
+
+    Returns:
+        List[int]: sorted CRFs, unique, endpoints guaranteed
+    """
+    if probes < 2:
+        return [int(round(qadjust_min_q))]
+
     qs = []
+
     for i in range(probes):
-        t = i / (probes - 1)
-        q = qadjust_min_q + (qadjust_max_q - qadjust_min_q) * (t ** (1 / gamma))
+        t = i / (probes - 1)  # linear position 0..1
+        t_bias = t ** gamma     # gamma shaping toward low CRF
+
+        q = qadjust_min_q + (qadjust_max_q - qadjust_min_q) * t_bias
         qs.append(int(round(q)))
+
+    # Ensure uniqueness and ordering
+    qs = sorted(set(qs))
+
+    # Force endpoints
+    if qs[0] != qadjust_min_q:
+        qs[0] = qadjust_min_q
+    if qs[-1] != qadjust_max_q:
+        qs[-1] = qadjust_max_q
 
     return qs
 
@@ -2404,7 +2549,7 @@ def estimate_analysis_q(cvvdp_curve, qadjust_target):
 
 def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, video_length, fr, max_parallel_encodes, probe_chunklist_dict, reuse_qadjust, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br,
                      qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma,
-                     cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, probing_log_file):
+                     cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, probing_log_file, cvvdp_dark_boost, cvvdp_probing_mode, cvvdp_table_file):
     qadjust_cycle = 1
     for probe_q in probe_qs[:probes]:
         for _, enc_cmd, _ in probe_encode_commands:
@@ -2412,92 +2557,176 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
                 if arg.startswith('--crf'):
                     enc_cmd[i] = f'--crf {probe_q}'
                     break
-        logger.info(f'Probing Q: {probe_q}')
-        print(f'\nProbing Q: {probe_q}')
+        logger.info(f'Probing at Q{probe_q}')
+        print(f'Probing at Q{probe_q}')
         run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
-        score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
-                                  qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
-                                  cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+        score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                  qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
+                                  cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
 
         cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
-    cvvdp_curve.sort(key=lambda r: r["q"])
-    for i, r in enumerate(cvvdp_curve):
-        if i == 0:
-            r["slope"] = None
-            r["delta_score"] = None
-            r["delta_bitrate"] = None
-            r["kbps_per_0_1_cvvdp"] = None
-        else:
-            prev = cvvdp_curve[i - 1]
+    recompute_curve_metrics(cvvdp_curve)
 
-            d_score = r["score"] - prev["score"]
-            d_br = r["avg_bitrate"] - prev["avg_bitrate"]
-
-            r["delta_score"] = d_score
-            r["delta_bitrate"] = d_br
-
-            # internal slope (used for knee logic)
-            if d_br == 0:
-                r["slope"] = None
-            else:
-                r["slope"] = d_score / d_br
-
-            # user-facing efficiency metric
-            if d_score == 0:
-                r["kbps_per_0_1_cvvdp"] = None
-            else:
-                r["kbps_per_0_1_cvvdp"] = abs(d_br) / (abs(d_score) * 10)
-
-    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, "advanced")
+    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 0)
     confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-    logger.info(f"Detected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
-    print(f"\nDetected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
-    probe_ref_qs = add_refinement_probes(cvvdp_curve, knee_i)
-    for probe_q in probe_ref_qs:
+    print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 0)
+    logger.info(f"Detected initial knee at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+    print(f"Detected initial knee at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 1)
+    for probe_q in ref_probe_qs:
         for _, enc_cmd, _ in probe_encode_commands:
             for i, arg in enumerate(enc_cmd):
                 if arg.startswith('--crf'):
                     enc_cmd[i] = f'--crf {probe_q}'
                     break
-        logger.info(f'Refinement probing Q: {probe_q}')
-        print(f'\nRefinement probing Q: {probe_q}')
+        logger.info(f'Refinement step 1: probing at Q{probe_q}')
+        print(f'Refinement step 1: probing at Q{probe_q}')
         run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
-        score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
-                                  qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0,
-                                  cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+        score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                  qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
+                                  cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
 
         cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
-    cvvdp_curve.sort(key=lambda r: r["q"])
-    # Recompute bitrate-aware slopes
-    for i, r in enumerate(cvvdp_curve):
-        if i == 0:
-            r["slope"] = None
-            r["delta_score"] = None
-            r["delta_bitrate"] = None
-            r["kbps_per_0_1_cvvdp"] = None
-        else:
-            prev = cvvdp_curve[i - 1]
+    recompute_curve_metrics(cvvdp_curve)
 
-            d_score = r["score"] - prev["score"]
-            d_br = r["avg_bitrate"] - prev["avg_bitrate"]
+    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 1)
+    confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+    print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 1)
+    logger.info(f"Detected knee after refining is at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+    print(f"Detected knee after refining is at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
+    if cvvdp_probing_mode != 'fast':
+        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 2)
+        logger.info(f'Refinement step 2: increasing resolution of the knee band by attempting to add more refinement probes around the knee.')
+        print(f'Refinement step 2: increasing resolution of the knee band by attempting to add more refinement probes around the knee.\n')
+        for probe_q in ref_probe_qs:
+            for _, enc_cmd, _ in probe_encode_commands:
+                for i, arg in enumerate(enc_cmd):
+                    if arg.startswith('--crf'):
+                        enc_cmd[i] = f'--crf {probe_q}'
+                        break
+            logger.info(f'Step 2 refinement probing at Q{probe_q}')
+            print(f'Step 2 refinement probing at Q{probe_q}')
+            run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+            score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                      qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model,
+                                      cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+            cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
-            r["delta_score"] = d_score
-            r["delta_bitrate"] = d_br
+        recompute_curve_metrics(cvvdp_curve)
 
-            # internal slope (used for knee logic)
-            if d_br == 0:
-                r["slope"] = None
-            else:
-                r["slope"] = d_score / d_br
+        knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 2)
+        third_knee = knee_row['q']
+        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 2)
+        logger.info(f"Detected knee after increased resolution is at Q{third_knee}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+        print(f"Detected knee after increased resolution is at Q{third_knee}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
+        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 3)  # Step 3 is the case where the knee is too close to either edge of the curve to be sure it's the correct one
+        if ref_probe_qs:
+            for probe_q in ref_probe_qs:
+                for _, enc_cmd, _ in probe_encode_commands:
+                    for i, arg in enumerate(enc_cmd):
+                        if arg.startswith('--crf'):
+                            enc_cmd[i] = f'--crf {probe_q}'
+                            break
 
-            # user-facing efficiency metric
-            if d_score == 0:
-                r["kbps_per_0_1_cvvdp"] = None
-            else:
-                r["kbps_per_0_1_cvvdp"] = abs(d_br) / (abs(d_score) * 10)
+                logger.info(f'Uncertain start or end of curve refinement probing at Q{probe_q}')
+                print(f'Uncertain start or end of curve refinement probing at Q{probe_q}')
 
+                run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+                score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                          qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q,
+                                          cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+                cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+            recompute_curve_metrics(cvvdp_curve)
+            knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 3)
+
+    if ref_probe_qs:
+        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 3)
+
+    # Special corner case where knee is at third point from the start and thus uncertain (step 4)
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 4)
+    if ref_probe_qs:
+        for probe_q in ref_probe_qs:
+            for _, enc_cmd, _ in probe_encode_commands:
+                for i, arg in enumerate(enc_cmd):
+                    if arg.startswith('--crf'):
+                        enc_cmd[i] = f'--crf {probe_q}'
+                        break
+
+            logger.info(f'Uncertain start of curve refinement probing at Q{probe_q}')
+            print(f'Uncertain start of curve refinement probing at Q{probe_q}')
+
+            run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+            score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                      qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model,
+                                      cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+            cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+        recompute_curve_metrics(cvvdp_curve)
+
+    # Special corner case where there is a gap of at least 3 CRF points between the knee and the previous probing point (step 5)
+    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 4)
+    if ref_probe_qs:
+        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 4)
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 5)
+    if ref_probe_qs:
+        for probe_q in ref_probe_qs:
+            for _, enc_cmd, _ in probe_encode_commands:
+                for i, arg in enumerate(enc_cmd):
+                    if arg.startswith('--crf'):
+                        enc_cmd[i] = f'--crf {probe_q}'
+                        break
+
+            logger.info(f'Large gap refinement probing at Q{probe_q}')
+            print(f'Large gap refinement probing at Q{probe_q}')
+
+            run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+            score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                      qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model,
+                                      cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+
+            cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+        recompute_curve_metrics(cvvdp_curve)
+        knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 5)
+
+    if ref_probe_qs:
+        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 5)
+
+    if cvvdp_probing_mode != 'fast':
+        # Special corner case where the bands 'diminishing' and 'transition' have a gap of at least 3 CRF points between them
+        curvatures = compute_curvature(cvvdp_curve)
+        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, curvatures, 6)
+        if ref_probe_qs:
+            for probe_q in ref_probe_qs:
+                for _, enc_cmd, _ in probe_encode_commands:
+                    for i, arg in enumerate(enc_cmd):
+                        if arg.startswith('--crf'):
+                            enc_cmd[i] = f'--crf {probe_q}'
+                            break
+
+                logger.info(f'Transition and diminishing boundary probing at Q{probe_q}')
+                print(f'Transition and diminishing boundary probing at Q{probe_q}')
+
+                run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+                score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                          qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q,
+                                          cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+
+                cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+            recompute_curve_metrics(cvvdp_curve)
+
+    for r in cvvdp_curve:
+        r["eff_band"] = classify_eff_band(r, knee_row) if knee_row else ""
+
+    cvvdp_curve = monotonic_smooth(cvvdp_curve)
     fieldnames = sorted({key for row in cvvdp_curve for key in row.keys()})
     with open(probing_log_file, "w", newline="") as f:
         f.write(f"{probe_qs}\n")
@@ -2508,69 +2737,203 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
     return cvvdp_curve, qadjust_cycle
 
 
-def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file):
-    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, "advanced")
-    confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-    logger.info(f"Detected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
-    print(f"\nDetected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
+def recompute_curve_metrics(cvvdp_curve):
+    """
+    Sort the curve by Q and recompute all bitrate/score derivatives.
+    Modifies the list in-place and returns it.
+    """
+
+    cvvdp_curve.sort(key=lambda r: r["q"])
+
+    for i, r in enumerate(cvvdp_curve):
+        if i == 0:
+            r["slope"] = None
+            r["delta_score"] = None
+            r["delta_bitrate"] = None
+            r["kbps_per_0_1_cvvdp"] = None
+            continue
+
+        prev = cvvdp_curve[i - 1]
+
+        d_score = r["score"] - prev["score"]
+        d_br = r["avg_bitrate"] - prev["avg_bitrate"]
+
+        r["delta_score"] = d_score
+        r["delta_bitrate"] = d_br
+
+        # slope used internally for knee detection
+        r["slope"] = None if d_br == 0 else d_score / d_br
+
+        # user-facing efficiency metric
+        r["kbps_per_0_1_cvvdp"] = None if d_score == 0 else abs(d_br) / (abs(d_score) * 10)
+
+    return cvvdp_curve
+
+
+def monotonic_smooth(curve):
+    """
+    Enforce monotonic decreasing scores using PAVA (Pool Adjacent Violators Algorithm).
+
+    Parameters:
+        curve: list of dicts, each with at least a "score" key.
+               Must be sorted by Q for meaningful results.
+
+    Returns:
+        curve (same list of dicts) with "score_smoothed" added to each dict.
+    """
+    n = len(curve)
+    if n == 0:
+        return curve
+
+    # --- extract scores ---
+    scores = [r["score"] for r in curve]
+    smoothed = scores.copy()
+    weights = [1] * n
+
+    i = 0
+    while i < n - 1:
+        # violation: next score is larger than current → enforce decreasing
+        if smoothed[i] < smoothed[i + 1]:
+            total_w = weights[i] + weights[i + 1]
+            avg = (smoothed[i] * weights[i] + smoothed[i + 1] * weights[i + 1]) / total_w
+            smoothed[i] = avg
+            smoothed[i + 1] = avg
+            weights[i] = total_w
+            weights[i + 1] = total_w
+
+            # back-propagate to fix previous violations
+            j = i
+            while j > 0 and smoothed[j - 1] < smoothed[j]:
+                total_w = weights[j - 1] + weights[j]
+                avg = (smoothed[j - 1] * weights[j - 1] + smoothed[j] * weights[j]) / total_w
+                smoothed[j - 1] = avg
+                smoothed[j] = avg
+                weights[j - 1] = total_w
+                weights[j] = total_w
+                j -= 1
+        i += 1
+
+    # --- store smoothed scores back into the dicts ---
+    for r, s in zip(curve, smoothed):
+        r["score_smoothed"] = s
+
+    return curve
+
+
+def compute_curvature(curve):
+    curvatures = [None] * len(curve)
+
+    xs = [math.log(r["avg_bitrate"]) for r in curve]
+    ys = [r["score"] for r in curve]
+
+    for i in range(1, len(curve) - 1):
+        dy2 = ys[i+1] - 2*ys[i] + ys[i-1]
+        dx1 = xs[i] - xs[i-1]
+        dx2 = xs[i+1] - xs[i]
+
+        if dx1 != 0 and dx2 != 0:
+            curvatures[i] = abs(dy2 / (dx1 * dx2))
+
+    return curvatures
+
+
+def classify_eff_band(row, knee_row):
+    if row["kbps_per_0_1_cvvdp"] is None:
+        return ""
+
+    e = row["kbps_per_0_1_cvvdp"]
+    ek = knee_row["kbps_per_0_1_cvvdp"]
+
+    if e > 1.5 * ek:
+        return "diminishing"
+    elif e > 1.1 * ek:
+        return "transition"
+    elif e >= 0.9 * ek:
+        return "knee_band"
+    else:
+        return "efficient"
+
+
+def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step):
+    lines = [
+        f"\nStep {step}:",
+        f"Detected knee at Q{knee_row['q']}, "
+        f"confidence score {confidence_score:.2f} "
+        f"and classified as {confidence_text}.\n"
+    ]
+
+    # --- widths ---
     q_width = max(len(str(r['q'])) for r in cvvdp_curve)
     q_width = max(q_width, len("q"))
 
     bitrate_width = max(len(f"{r['avg_bitrate']:.2f}") for r in cvvdp_curve)
     bitrate_width = max(bitrate_width, len("avg_bitrate"))
 
-    score_width = max(len(f"{r['score']:.6f}") for r in cvvdp_curve)
+    score_width = max(len(f"{r['score']:.8f}") for r in cvvdp_curve)
     score_width = max(score_width, len("score"))
 
     slope_width = max(
-        len(f"{r['slope']:.6f}") if r['slope'] is not None else len("None")
+        len(f"{r['slope']:.8f}") if r['slope'] is not None else len("None")
         for r in cvvdp_curve
     )
     slope_width = max(slope_width, len("slope"))
 
-    # Header and line formats
+    eff_width = max(len(r.get("eff_band", "")) for r in cvvdp_curve)
+    eff_width = max(eff_width, len("eff_band"))
+
+    # --- formats ---
     header_fmt = (
         f"{{:>{q_width}}}  "
         f"{{:>{bitrate_width}}}  "
         f"{{:>{score_width}}}  "
-        f"{{:>{slope_width}}}"
+        f"{{:>{slope_width}}}  "
+        f"{{:>{eff_width}}}"
     )
 
     line_fmt = (
         f"{{:>{q_width}}}  "
         f"{{:>{bitrate_width}.2f}}  "
-        f"{{:>{score_width}.6f}}  "
-        f"{{:>{slope_width}}}"
+        f"{{:>{score_width}.8f}}  "
+        f"{{:>{slope_width}}}  "
+        f"{{:>{eff_width}}}"
     )
 
-    # Separator (3 gaps between 4 columns = 6 spaces total)
-    separator = "-" * (q_width + bitrate_width + score_width + slope_width + 6)
+    separator = "-" * (
+        q_width + bitrate_width + score_width + slope_width + eff_width + 8
+    )
 
-    # Print
-    header = header_fmt.format("q", "avg_bitrate", "score", "slope")
-    print(header)
-    print(separator)
+    # --- header ---
+    lines.append(header_fmt.format("q", "avg_bitrate", "score", "slope", "eff_band"))
+    lines.append(separator)
 
+    # --- rows ---
     for r in cvvdp_curve:
-        slope_str = f"{r['slope']:.6f}" if r["slope"] is not None else "None"
-        line = line_fmt.format(r['q'], r['avg_bitrate'], r['score'], slope_str)
+        slope_str = f"{r['slope']:.8f}" if r["slope"] is not None else "None"
+
+        line = line_fmt.format(
+            r['q'],
+            r['avg_bitrate'],
+            r['score'],
+            slope_str,
+            r.get("eff_band", "")
+        )
 
         if knee_row is not None and r["q"] == knee_row["q"]:
             line += "  <== KNEE"
 
-        print(line)
+        lines.append(line)
 
-    if knee_i is not None:
+    # --- explanation ---
+    if knee_i is not None and step > 5:
         q_knee = knee_row["q"]
-
         left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
         right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
 
-        print("\n==== CRF DECISION EXPLANATION ====")
-        print(f"Detected knee at Q{q_knee}")
+        lines.append("\n==== CRF DECISION EXPLANATION ====")
+        lines.append(f"Detected knee at Q{q_knee}")
 
         if left:
-            print(
+            lines.append(
                 f"Below knee (Q{left['q']} → Q{q_knee}):  "
                 f"{knee_row['delta_score']:+.3f} CVVDP for "
                 f"{knee_row['delta_bitrate']:+.0f} kbps  →  "
@@ -2578,242 +2941,548 @@ def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file):
             )
 
         if right:
-            print(
+            lines.append(
                 f"Above knee (Q{q_knee} → Q{right['q']}):  "
                 f"{right['delta_score']:+.3f} CVVDP for "
                 f"{right['delta_bitrate']:+.0f} kbps  →  "
                 f"{fmt(right['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP"
             )
 
-        print("=================================")
-    print_cvvdp_curve_data_to_file(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text)
+        lines.append("=================================")
+
+    return "\n".join(lines)
 
 
-def print_cvvdp_curve_data_to_file(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text):
-    # Select output sink
-    ctx = open(cvvdp_table_file, "w", encoding="utf-8")
-    with ctx as f:
-        write = f.write
-
-        write(f"\nDetected knee Q: {knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
-
-        q_width = max(len(str(r['q'])) for r in cvvdp_curve)
-        q_width = max(q_width, len("q"))
-
-        bitrate_width = max(len(f"{r['avg_bitrate']:.2f}") for r in cvvdp_curve)
-        bitrate_width = max(bitrate_width, len("avg_bitrate"))
-
-        score_width = max(len(f"{r['score']:.6f}") for r in cvvdp_curve)
-        score_width = max(score_width, len("score"))
-
-        slope_width = max(
-            len(f"{r['slope']:.6f}") if r['slope'] is not None else len("None")
-            for r in cvvdp_curve
-        )
-        slope_width = max(slope_width, len("slope"))
-
-        header_fmt = (
-            f"{{:>{q_width}}}  "
-            f"{{:>{bitrate_width}}}  "
-            f"{{:>{score_width}}}  "
-            f"{{:>{slope_width}}}"
+def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, step):
+    if step == 6:
+        logger.info(
+            f"Detected knee at Q{knee_row['q']}, "
+            f"confidence score {confidence_score:.2f} "
+            f"and classified as {confidence_text}."
         )
 
-        line_fmt = (
-            f"{{:>{q_width}}}  "
-            f"{{:>{bitrate_width}.2f}}  "
-            f"{{:>{score_width}.6f}}  "
-            f"{{:>{slope_width}}}"
-        )
+    # --- compute eff_band once ---
+    for r in cvvdp_curve:
+        r["eff_band"] = classify_eff_band(r, knee_row) if knee_row else ""
 
-        separator = "-" * (q_width + bitrate_width + score_width + slope_width + 6)
+    output = format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step)
 
-        header = header_fmt.format("q", "avg_bitrate", "score", "slope")
-        write(header + "\n")
-        write(separator + "\n")
+    # console
+    if step == 6:
+        print(output)
 
-        for r in cvvdp_curve:
-            slope_str = f"{r['slope']:.6f}" if r["slope"] is not None else "None"
-            line = line_fmt.format(r['q'], r['avg_bitrate'], r['score'], slope_str)
-
-            if knee_row is not None and r["q"] == knee_row["q"]:
-                line += "  <== KNEE"
-
-            write(line + "\n")
-
-        if knee_i is not None:
-            q_knee = knee_row["q"]
-            left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
-            right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
-
-            write("\n==== CRF DECISION EXPLANATION ====\n")
-            write(f"Detected knee at Q{q_knee}\n")
-
-            if left:
-                write(
-                    f"Below knee (Q{left['q']} → Q{q_knee}):  "
-                    f"{knee_row['delta_score']:+.3f} CVVDP for "
-                    f"{knee_row['delta_bitrate']:+.0f} kbps  →  "
-                    f"{fmt(knee_row['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP\n"
-                )
-
-            if right:
-                write(
-                    f"Above knee (Q{q_knee} → Q{right['q']}):  "
-                    f"{right['delta_score']:+.3f} CVVDP for "
-                    f"{right['delta_bitrate']:+.0f} kbps  →  "
-                    f"{fmt(right['kbps_per_0_1_cvvdp'])} kbps per 0.1 CVVDP\n"
-                )
-
-            write("=================================\n")
+    # file
+    mode = "a" if step != 0 else "w"
+    with open(cvvdp_table_file, mode, encoding="utf-8") as f:
+        f.write(output + "\n")
 
 
-def detect_knee_by_curvature(cvvdp_curve, mode="advanced"):
+def detect_knee_by_curvature(cvvdp_curve, step):
     """
-    Detects the knee in the CVVDP score vs bitrate curve (bitrate-aware).
-    The knee corresponds to the point where adding bits gives minimal score improvement.
-
-    Parameters:
-        cvvdp_curve: list of dicts with keys 'q', 'score', 'avg_bitrate', 'slope'
-        mode: "basic" (largest slope drop) or "advanced" (largest curvature in slope)
-
-    Returns:
-        (knee_index, knee_row) or (None, None)
+    Detect the classical RD knee:
+    - first significant rise in curvature (onset of efficiency drop)
+    - avoids late-stage curvature peaks
     """
-    if len(cvvdp_curve) < 3:
+
+    if len(cvvdp_curve) < 4:
         return None, None
 
-    # Ensure ordered by Q
     curve = sorted(cvvdp_curve, key=lambda r: r["q"])
+    curve = monotonic_smooth(curve)
+    n = len(curve)
 
-    # --- compute bitrate-based slopes if missing ---
-    for i in range(1, len(curve)):
-        prev = curve[i - 1]
-        curr = curve[i]
-        db = curr["avg_bitrate"] - prev["avg_bitrate"]
-        if db == 0:
-            curr["slope"] = None
-        else:
-            curr["slope"] = (curr["score"] - prev["score"]) / db
+    slopes = [None]
+    false_knees = []
 
-    best_i = None
-    best_metric = None
+    for i in range(1, n):
+        b0 = curve[i-1]["avg_bitrate"]
+        b1 = curve[i]["avg_bitrate"]
 
-    for i in range(1, len(curve) - 2):  # avoid tail acceleration
-        s_prev = curve[i - 1]["slope"]
-        s_curr = curve[i]["slope"]
-
-        if s_prev is None or s_curr is None:
+        if b0 <= 0 or b1 <= 0:
+            slopes.append(None)
             continue
 
-        if mode == "basic":
-            metric = abs(s_curr)
-        else:  # advanced
-            metric = abs(s_curr - s_prev)
+        dlogb = math.log(b1) - math.log(b0)
+        if abs(dlogb) < 1e-12:
+            slopes.append(None)
+            continue
 
-        if best_metric is None or metric > best_metric:
-            best_metric = metric
-            best_i = i
+        ds = curve[i]["score_smoothed"] - curve[i-1]["score_smoothed"]
+        slopes.append(ds / dlogb)
+
+    # --- compute curvature metrics ---
+    metrics = [None, None, None]
+
+    for i in range(3, n - 1):
+        s_prev = slopes[i - 1]
+        s_curr = slopes[i]
+
+        if not (isinstance(s_prev, (int, float)) and isinstance(s_curr, (int, float))):
+            metrics.append(None)
+            continue
+
+        metric = abs(s_curr - s_prev) / (abs(s_prev) + abs(s_curr) + 1e-12)
+        metrics.append(metric)
+
+    # --- robust normalization (median + MAD) ---
+    valid_metrics = [m for m in metrics if isinstance(m, (int, float))]
+    if not valid_metrics:
+        return None, None
+
+    median_m = statistics.median(valid_metrics)
+    mad = statistics.median(abs(m - median_m) for m in valid_metrics) + 1e-12
+
+    # --- find first significant curvature rise or peak ---
+    prev_metric = None
+    prev_z = None
+    best_i = None
+
+    for i in range(3, n - 1):
+        metric = metrics[i]
+        if not isinstance(metric, (int, float)):
+            continue
+
+        s_prev = slopes[i - 1]
+        s_curr = slopes[i]
+
+        if not (isinstance(s_prev, (int, float)) and isinstance(s_curr, (int, float))):
+            continue
+
+        # --- monotonic slope constraint ---
+        # Only consider region where slope is decreasing (efficiency drop begins)
+        if s_curr >= s_prev:
+            continue
+
+        z = (metric - median_m) / mad
+
+        if prev_metric is not None:
+            # --- detect first significant rise ---
+            if metric > prev_metric and z > 1.3:
+                best_i = i
+                break
+
+            # --- allow flat or slightly declining region to count as peak ---
+            elif metric <= prev_metric * 0.98:
+                candidate_q = curve[i - 1]['q']
+                if prev_z is not None and prev_z > 1.3:
+                    best_i = i - 1
+                    break
+                else:
+                    false_knees.append((i - 1, candidate_q, prev_z))
+
+        prev_metric = metric
+        prev_z = z
+
+    # --- fallback: no peak found → use strongest early candidate ---
+    if best_i is None:
+        best_score = None
+        for i in range(3, n - 1):
+            metric = metrics[i]
+            if not isinstance(metric, (int, float)):
+                continue
+
+            z = (metric - median_m) / mad
+            pos_weight = (n - i) / (n - 3)
+            score = z * pos_weight
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best_i = i
 
     if best_i is None:
         return None, None
+    # --- print false knees only if a different knee was selected ---
+    else:
+        for fk_i, fk_q, fk_z in false_knees:
+            if fk_i != best_i and step < 7:
+                msg = f"Detected false knee at Q{fk_q} (z={fk_z:.2f}), ignoring."
+                logger.info(msg)
+                print(msg + '\n')
 
     return best_i, curve[best_i]
 
 
 def compute_knee_confidence(cvvdp_curve, knee_i):
     """
-    Returns a dimensionless confidence score for the detected knee.
-    Higher = clearer knee.
+    Compute a dimensionless confidence score for the detected efficiency knee.
+    Confidence = normalized slope acceleration at the knee relative to the median.
+
+    Assumes:
+        - curve already sorted by Q
+        - monotonic smoothing already applied (score_smoothed present)
     """
-    if knee_i is None or knee_i <= 0:
-        return None
+    if knee_i is None or len(cvvdp_curve) < 4:
+        return None, "N/A"
 
-    curve = sorted(cvvdp_curve, key=lambda r: r["q"])
+    curve = cvvdp_curve
+    n = len(curve)
 
-    curvatures = []
-    for i in range(1, len(curve)):
-        s_prev = curve[i - 1].get("slope")
-        s_curr = curve[i].get("slope")
-        if s_prev is None or s_curr is None:
+    # --- compute log-bitrate slopes ---
+    slopes = [None]
+    for i in range(1, n):
+        b0 = curve[i - 1]["avg_bitrate"]
+        b1 = curve[i]["avg_bitrate"]
+
+        if b0 <= 0 or b1 <= 0:
+            slopes.append(None)
             continue
-        curvatures.append(abs(s_curr - s_prev))
 
-    if not curvatures:
-        return None
+        dlogb = math.log(b1) - math.log(b0)
+        if abs(dlogb) < 1e-12:
+            slopes.append(None)
+            continue
 
-    knee_curvature = abs(
-        curve[knee_i]["slope"] - curve[knee_i - 1]["slope"]
-    )
+        ds = curve[i]["score_smoothed"] - curve[i - 1]["score_smoothed"]
+        slopes.append(ds / dlogb)
 
-    # robust baseline
-    curvatures_sorted = sorted(curvatures)
-    median_curvature = curvatures_sorted[len(curvatures_sorted) // 2]
+    # --- compute curvature using same range as detector (3..n-2) ---
+    curvatures = []
+    for i in range(3, n - 1):
+        s_prev = slopes[i - 1]
+        s_curr = slopes[i]
 
+        if isinstance(s_prev, (int, float)) and isinstance(s_curr, (int, float)):
+            curvatures.append(abs(s_curr - s_prev) /
+                              (abs(s_prev) + abs(s_curr) + 1e-12))
+        else:
+            curvatures.append(None)
+
+    valid_curvatures = [c for c in curvatures if c is not None]
+    if not valid_curvatures:
+        return None, "N/A"
+
+    # --- map knee index to curvature index ---
+    curvature_index = knee_i - 3
+    if curvature_index < 0 or curvature_index >= len(curvatures):
+        return None, "N/A"
+
+    knee_curvature = curvatures[curvature_index]
+    if knee_curvature is None:
+        return None, "N/A"
+
+    median_curvature = float(np.median(valid_curvatures))
     if median_curvature <= 1e-12:
-        return None
+        return None, "N/A"
 
     confidence_score = knee_curvature / median_curvature
 
-    if confidence_score is None:
-        confidence_text = "N/A"
-    elif confidence_score < 1.2:
-        confidence_text = "weak"
+    # --- interpret ---
+    if confidence_score < 1.3:
+        label = "weak"
     elif confidence_score < 1.8:
-        confidence_text = "moderate"
+        label = "moderate"
     elif confidence_score < 2.5:
-        confidence_text = "clear"
+        label = "clear"
     else:
-        confidence_text = "strong"
+        label = "strong"
 
-    return confidence_score, confidence_text
+    return float(confidence_score), label
 
 
-def add_refinement_probes(curve, knee_i):
+def midpoint_probe(q0, q1, existing_qs):
     """
-    Pick up to TWO refinement probes: one on each side of the knee,
-    if spacing allows. Bitrate-aware knee detection already done.
+    Return a valid integer midpoint probe strictly inside (q0, q1).
+    Avoid duplicates and handle small CRF gaps.
     """
+    if q1 - q0 <= 1:
+        #msg = f"No space to place probe between Q{q0} and Q{q1}."
+        #print('\n' + msg)
+        #logger.info(msg)
+        return None
 
-    if knee_i is None:
+    mid = int(round((q0 + q1) / 2))
+
+    # ensure strictly inside
+    if mid <= q0:
+        mid = q0 + 1
+    elif mid >= q1:
+        mid = q1 - 1
+
+    # avoid duplicates
+    if mid in existing_qs:
+        if mid + 1 < q1 and mid + 1 not in existing_qs:
+            mid = mid + 1
+        elif mid - 1 > q0 and mid - 1 not in existing_qs:
+            mid = mid - 1
+        else:
+            #msg = f"Midpoint {mid} already exists and no alternative inside Q{q0}-{q1}."
+            #print(msg)
+            #logger.info(msg)
+            return None
+
+    #msg = f"Proposed midpoint probe at Q{mid} between Q{q0} and Q{q1}."
+    #print('\n' + msg)
+    #logger.info(msg)
+    return mid
+
+
+def stepped_probe(q1, q2, existing_qs, step):
+    # ensure probe lands inside the interval but toward the lower-Q side
+    lo = min(q1, q2)
+    hi = max(q1, q2)
+
+    probe = hi - step  # place probe toward lower-Q side
+
+    if probe in existing_qs:
+        return None
+    if not (lo < probe < hi):
+        return None
+    return probe
+
+
+def try_probe(curve, i1, i2, existing_qs, opposite, step):
+    """
+    Attempt to generate a probe between two curve indices.
+    Uses midpoint for step=1 (existing behavior).
+    Uses stepped probe for step>1.
+    """
+    q1 = curve[i1]["q"]
+    q2 = curve[i2]["q"]
+
+    # --- step 1: midpoint, step 2+: stepped ---
+    if step == 1:
+        probe = midpoint_probe(q1, q2, existing_qs)
+    else:
+        probe = stepped_probe(q1, q2, existing_qs, step)
+
+    if probe is not None:
+        return probe
+
+    # --- try opposite side ---
+    if opposite:
+        q1 = curve[opposite[0]]["q"]
+        q2 = curve[opposite[1]]["q"]
+
+        if step == 1:
+            probe = midpoint_probe(q1, q2, existing_qs)
+        else:
+            probe = stepped_probe(q1, q2, existing_qs, step)
+
+        if probe is not None:
+            return probe
+
+    return None
+
+
+def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
+    if knee_i is None or len(curve) < 3:
+        msg = "Curve too short or knee index None; no final probe added."
+        print(msg)
+        logger.info(msg)
         return []
 
-    curve = sorted(curve, key=lambda r: r["q"])
     n = len(curve)
+    existing_qs = {row["q"] for row in curve}
 
-    if knee_i <= 0 or knee_i >= n - 1:
+    # -------------------------
+    # STEP 1: first phase refinement
+    # STEP 2: tighter +-1 refinement around the knee
+    # -------------------------
+    if step in (1, 2):
+        qs = []
+        if knee_i <= 0:
+            left_index = None
+        else:
+            left_index = knee_i - 1
+        if knee_i >= n - 1:
+            right_index = None
+        else:
+            right_index = knee_i + 1
+        q_knee = curve[knee_i]["q"]
+
+        if step == 1:
+            if left_index is not None:
+                q_left = curve[left_index]["q"]
+                if q_knee - q_left >= 2:
+                    ql = (q_left + q_knee) // 2
+                    if ql not in (q_left, q_knee):
+                        qs.append(ql)
+            if right_index is not None:
+                q_right = curve[right_index]["q"]
+                if q_right - q_knee >= 2:
+                    midpoint = (q_knee + q_right) // 2
+                    qr = min(midpoint, q_right - 2)
+
+                    if qr not in (q_knee, q_right):
+                        qs.append(qr)
+        else:
+            if left_index is not None:
+                q_left = curve[left_index]["q"]
+                ql = q_knee - 1
+                if ql > q_left:
+                    qs.append(ql)
+            if right_index is not None:
+                q_right = curve[right_index]["q"]
+                qr = q_knee + 1
+                if qr < q_right:
+                    qs.append(qr)
+        return qs
+
+    # -------------------------
+    # STEP 3: general edge-case refinement
+    # -------------------------
+    elif step == 3:
+        qs = []
+
+        # --- knee near start ---
+        if knee_i <= 3 and ((
+                (curve[knee_i]["q"] - curve[0]["q"]) > 8 and
+                (curve[knee_i]["q"] - curve[knee_i - 1]["q"]) > 1
+        ) or (knee_i < 3)):
+            if knee_i == 1:
+                primary = (0, 1)
+                opposite = (1, 2)
+            elif knee_i == 2:
+                primary = (1, 2)
+                opposite = (0, 1)
+            else:
+                primary = (2, 3)
+                opposite = (1, 2)
+
+            probe_q = try_probe(curve, primary[0], primary[1], existing_qs, opposite, step)
+            if probe_q is not None:
+                qs.append(probe_q)
+
+        # --- knee near end ---
+        elif knee_i in (n - 3, n - 2):
+            if knee_i == n - 2:
+                primary = (n - 2, n - 1)
+                opposite = (n - 3, n - 2)
+            else:  # knee_i == n - 3
+                primary = (n - 3, n - 2)
+                opposite = (n - 2, n - 1)
+
+            probe_q = try_probe(curve, primary[0], primary[1], existing_qs, opposite, step)
+            if probe_q is not None:
+                qs.append(probe_q)
+
+        if qs:
+            probes = ", ".join(f"Q{q}" for q in qs)
+            msg = (
+                f"Step {step}: detected knee at Q{knee_row['q']} near curve edges, "
+                f"adding refinement probe(s) at {probes}."
+            )
+            print(msg + '\n')
+            logger.info(msg)
+        else:
+            msg = f"Step {step}: no refinement probe added; the knee is not near curve edges."
+            print(msg + '\n')
+            logger.info(msg)
+
+        return qs
+
+    # -------------------------
+    # STEP 4: structural uncertainty (ONLY third point)
+    # -------------------------
+    elif step == 4:
+        qs = []
+
+        if knee_i == 2:
+            primary = (1, 2)
+            opposite = (0, 1)
+
+            probe_q = try_probe(curve, primary[0], primary[1], existing_qs, opposite, step)
+            if probe_q is not None:
+                qs.append(probe_q)
+
+        if qs:
+            probes = ", ".join(f"Q{q}" for q in qs)
+            msg = (
+                f"Step {step}: knee at structurally uncertain third point (Q{knee_row['q']}), "
+                f"adding refinement probe(s) at: {probes}."
+            )
+            print(msg)
+            logger.info(msg)
+        else:
+            msg = f"Step {step}: no refinement probe added; the knee is not at the third probing point."
+            print(msg + '\n')
+            logger.info(msg)
+
+        return qs
+
+    # -------------------------
+    # STEP 5: gap-before-knee
+    # -------------------------
+    elif step == 5:
+        if knee_i > 0:
+            q_prev = curve[knee_i - 1]["q"]
+            q_knee = curve[knee_i]["q"]
+            gap = q_knee - q_prev
+
+            if gap > 2:
+                probe_q = q_knee - 1
+
+                if probe_q not in existing_qs:
+                    msg = (
+                        f"Step {step}: over 2 CRF points gap before knee at Q{knee_row['q']}, "
+                        f"inserting final refinement probe at Q{probe_q}."
+                    )
+                    print(msg + '\n')
+                    logger.info(msg)
+                    return [probe_q]
+
+        msg = f"Step {step}: no refinement probe added; the gap before the knee point is not over 2 CRF points."
+        print(msg + '\n')
+        logger.info(msg)
         return []
 
-    q_left = curve[knee_i - 1]["q"]
-    q_knee = curve[knee_i]["q"]
-    q_right = curve[knee_i + 1]["q"]
+    # -------------------------
+    # STEP 6: transition → diminishing boundary refinement
+    # -------------------------
+    elif step == 6 and curvatures is not None:
+        boundary_i = None
 
-    new_qs = []
+        for i in range(0, knee_i - 1):
+            row_curr = curve[i]
+            row_next = curve[i + 1]
 
-    # --- midpoint left ---
-    if abs(q_knee - q_left) >= 2:
-        ql = (q_left + q_knee) // 2
-        if ql not in (q_left, q_knee):
-            new_qs.append(ql)
+            if row_curr["kbps_per_0_1_cvvdp"] is None:
+                continue
+            if row_next["kbps_per_0_1_cvvdp"] is None:
+                continue
 
-    # --- midpoint right ---
-    if abs(q_right - q_knee) >= 2:
-        qr = (q_knee + q_right) // 2
-        if qr not in (q_knee, q_right):
-            new_qs.append(qr)
+            band_curr = classify_eff_band(row_curr, knee_row)
+            band_next = classify_eff_band(row_next, knee_row)
 
-    return new_qs
+            if band_curr == "diminishing" and band_next == "transition":
+                boundary_i = i
+
+        if boundary_i is not None:
+            q_low = curve[boundary_i]["q"]
+            q_high = curve[boundary_i + 1]["q"]
+            gap = q_high - q_low
+
+            if gap > 2 and abs(boundary_i - knee_i) >= 2:
+                probe_q = (q_low + q_high) // 2
+
+                if probe_q not in existing_qs:
+                    msg = (
+                        f"Step {step}: gap at transition → diminishing boundary, Q{q_high} → Q{q_low}, is over 2 CRF points "
+                        f"(knee detected at Q{knee_row['q']}), inserting final refinement probe at Q{probe_q}."
+                    )
+                    print(msg + '\n')
+                    logger.info(msg)
+                    return [probe_q]
+
+        msg = f"Step {step}: no refinement probe added; the gap between the boundary of 'transition' and 'diminishing' bands is not over 2 CRF points."
+        print(msg)
+        logger.info(msg)
+        return []
+
+    # fallback
+    msg = f"Step {step}: no final refinement probe added; unknown step."
+    print(msg + '\n')
+    logger.info(msg)
+    return []
 
 
-def suggest_q_and_target_cvvdp(cvvdp_curve, knee_mode, bias):
+def suggest_q_and_target_cvvdp(cvvdp_curve, bias):
     """
     Suggest a final Q and estimate the resulting CVVDP score and average bitrate.
 
     Parameters:
         cvvdp_curve : list of dicts
             Each dict must contain 'q', 'score', and 'avg_bitrate'.
-        knee_mode : str
-            "basic" or "advanced" knee detection.
         bias : int
             Offset applied to knee Q to suggest slightly lower or higher Q.
             Typically -1 or +1.
@@ -2830,14 +3499,27 @@ def suggest_q_and_target_cvvdp(cvvdp_curve, knee_mode, bias):
     curve = sorted(cvvdp_curve, key=lambda r: r["q"])
 
     # Detect knee
-    knee_i, knee_row = detect_knee_by_curvature(curve, mode=knee_mode)
+    knee_i, knee_row = detect_knee_by_curvature(curve, 7)
 
     # Compute suggested Q
     if knee_i is None:
         # Fallback: midpoint of curve
         suggested_q = (curve[0]["q"] + curve[-1]["q"]) // 2
     else:
-        suggested_q = int(knee_row["q"] + bias)
+        # --- classify all rows ---
+        for r in curve:
+            r["eff_band"] = classify_eff_band(r, knee_row)
+
+        # --- collect transition band ---
+        transition_rows = [r for r in curve if r["eff_band"] == "transition"]
+
+        if transition_rows:
+            # pick first transition point (lowest Q)
+            suggested_q = transition_rows[0]["q"] + bias
+        else:
+            # fallback to knee behavior
+            suggested_q = int(knee_row["q"] + bias)
+
         # Clamp to min/max Q
         suggested_q = max(curve[0]["q"], min(curve[-1]["q"], suggested_q))
 
@@ -2956,6 +3638,10 @@ def fmt(v):
     return f"{v:.0f}" if v is not None else "n/a"
 
 
+def parse_float(v):
+    return None if v in (None, "", "None") else float(v)
+
+
 def terminate_all_processes():
     with process_list_lock:
         for p in active_processes:
@@ -3014,9 +3700,10 @@ def main():
     parser.add_argument('--qadjust-cpu', nargs='?', default=8, type=int)
     parser.add_argument('--qadjust-workers', nargs='?', type=str)
     parser.add_argument('--qadjust-target', nargs='?', type=float)
-    parser.add_argument('--qadjust-min-q', nargs='?', default=20, type=int)
+    parser.add_argument('--qadjust-min-q', nargs='?', default=16, type=int)
     parser.add_argument('--qadjust-max-q', nargs='?', default=35, type=int)
     parser.add_argument('--cvvdp-bias', nargs='?', default=0, type=int)
+    parser.add_argument('--cvvdp-probing-skip', nargs='?', default=5, type=int)
     parser.add_argument('--cvvdp-min-luma', nargs='?', type=float)
     parser.add_argument('--cvvdp-max-luma', nargs='?', type=float)
     parser.add_argument('--probes', nargs='?', type=int)
@@ -3024,6 +3711,9 @@ def main():
     parser.add_argument('--cvvdp-config', nargs='?', type=str)
     parser.add_argument('--cvvdp-resizetodisplay', action='store_true')
     parser.add_argument('--cvvdp-probing-only', action='store_true')
+    parser.add_argument('--cvvdp-probing-length', nargs='?', default=5, type=int)
+    parser.add_argument('--cvvdp-probing-mode', nargs='?', default='full', type=str)
+    parser.add_argument('--cvvdp-dark-boost', action='store_true')
 
     # Command-line arguments
     args = parser.parse_args()
@@ -3069,6 +3759,7 @@ def main():
     qadjust_min_q = args.qadjust_min_q
     qadjust_max_q = args.qadjust_max_q
     cvvdp_bias = args.cvvdp_bias
+    cvvdp_probing_skip = args.cvvdp_probing_skip / 100
     cvvdp_min_luma = args.cvvdp_min_luma
     cvvdp_max_luma = args.cvvdp_max_luma
     probes = args.probes
@@ -3076,6 +3767,9 @@ def main():
     cvvdp_config = args.cvvdp_config
     cvvdp_resizetodisplay = args.cvvdp_resizetodisplay
     cvvdp_probing_only = args.cvvdp_probing_only
+    cvvdp_probing_length = args.cvvdp_probing_length
+    cvvdp_probing_mode = args.cvvdp_probing_mode
+    cvvdp_dark_boost = args.cvvdp_dark_boost
     extracl_dict = {}
     dovicl_dict = {}
 
@@ -3088,55 +3782,55 @@ def main():
     if encoder not in ('rav1e', 'svt', 'aom', 'x265'):
         print("Valid encoder choices are rav1e, svt, aom or x265.\n")
         sys.exit(1)
-    if encoder in ('svt', 'aom', 'x265') and 2 > q > 64:
+    if encoder in ('svt', 'aom', 'x265') and q and (q < 2 or q > 64):
         print("Q must be 2-64.\n")
         sys.exit(1)
-    if encoder == 'rav1e' and 0 > q > 255:
+    if encoder == 'rav1e' and q and (q < 0 or q > 255):
         print("Q must be 0-255.\n")
         sys.exit(1)
-    if -1 > cpu > 12:
+    if cpu < -1 or cpu > 12:
         print("CPU must be -1..12.\n")
         sys.exit(1)
-    if threads and 1 > threads > 64:
+    if threads and (threads < 1 or threads > 64):
         print("Threads must be 1-64.\n")
         sys.exit(1)
-    if min_chunk_length and 5 > min_chunk_length > 999999:
+    if min_chunk_length and (min_chunk_length < 5 or min_chunk_length > 999999):
         print("Minimum chunk length must be 5-999999.\n")
         sys.exit(1)
-    if 1 > max_parallel_encodes > 64:
+    if max_parallel_encodes < 1 or max_parallel_encodes > 64:
         print("Maximum parallel encodes is 1-64.\n")
         sys.exit(1)
     if graintable_method and graintable_method not in (0, 1):
         print("Graintable method must be 0 or 1.\n")
         sys.exit(1)
-    if graintable_sat and 0 > graintable_sat > 1:
+    if graintable_sat and (graintable_sat < 0 or graintable_sat > 1):
         print("Graintable saturation must be 0-1.0.\n")
         sys.exit(1)
-    if 0 > scd_method > 2:
+    if scd_method < 0 or scd_method > 2:
         print("Scene change detection method must be 0, 1 or 2.\n")
         sys.exit(1)
     if scd_tonemap and scd_tonemap not in (0, 1):
         print("Scene change detection tonemap must be 0 or 1.\n")
         sys.exit(1)
-    if 0 > downscale_scd > 8:
+    if downscale_scd < 0 or downscale_scd > 8:
         print("Scene change detection downscale factor must be 0-8.\n")
         sys.exit(1)
     if decode_method and decode_method not in (0, 1):
         print("Decoding method must be 0 or 1.\n")
         sys.exit(1)
-    if credits_q and encoder in ('svt', 'aom') and 2 > credits_q > 64:
+    if credits_q and encoder in ('svt', 'aom') and (credits_q < 2 or credits_q > 64):
         print("Q for credits must be 2-64.\n")
         sys.exit(1)
-    if credits_q and encoder == 'rav1e' and 0 > credits_q > 255:
+    if credits_q and encoder == 'rav1e' and (credits_q < 0 or credits_q > 255):
         print("Q for credits must be 0-255.\n")
         sys.exit(1)
-    if credits_cpu and -1 > credits_cpu > 12:
+    if credits_cpu and (credits_cpu < -1 or credits_cpu > 12):
         print("CPU for credits must be -1..12.\n")
         sys.exit(1)
-    if graintable and graintable_cpu and -1 > graintable_cpu > 12:
+    if graintable and graintable_cpu and (graintable_cpu < -1 or graintable_cpu > 12):
         print("CPU for FGS analysis must be -1..12.\n")
         sys.exit(1)
-    if qadjust and qadjust_cpu and -1 > qadjust_cpu > 12:
+    if qadjust and qadjust_cpu and (qadjust_cpu < -1 or qadjust_cpu > 12):
         print("CPU for qadjust must be -1..12.\n")
         sys.exit(1)
     if scdetect_only and scd_method == 0:
@@ -3145,10 +3839,10 @@ def main():
     if qadjust_min_q >= qadjust_max_q:
         print("Qadjust-min-q must be less than qadjust-max-q.\n")
         sys.exit(1)
-    if cvvdp_min_luma and 0.0 <= cvvdp_min_luma > 0.99:
+    if cvvdp_min_luma and (cvvdp_min_luma < 0 or cvvdp_min_luma > 0.99):
         print("Cvvdp-min-luma must be 0-0.99.\n")
         sys.exit(1)
-    if cvvdp_max_luma and 0.01 >= cvvdp_max_luma > 1:
+    if cvvdp_max_luma and (cvvdp_max_luma < 0.01 or cvvdp_max_luma > 1):
         print("Cvvdp-max-luma must be 0.01-1.0.\n")
         sys.exit(1)
     if cvvdp_min_luma and cvvdp_max_luma and cvvdp_min_luma >= cvvdp_max_luma:
@@ -3166,6 +3860,12 @@ def main():
             qadjust_threads = 1
     except ValueError:
         print("Invalid format for --qadjust-workers. Expected format: workers,threads (e.g., 2,4). Workers = how many parallel chunks calculated, threads = the numStream parameter in VSHIP.")
+        sys.exit(1)
+    if cvvdp_probing_length < 3 or cvvdp_probing_length > 10:
+        print("CVVDP probing length should be 3-10.")
+        sys.exit(1)
+    if cvvdp_probing_mode not in ('fast', 'full'):
+        print("The allowed modes for CVVDP probing are 'fast' and 'full'.")
         sys.exit(1)
 
     # Check that needed executables can be found
@@ -3277,33 +3977,19 @@ def main():
     else:
         br = 2
     if not cvvdp_min_luma:
-        cvvdp_min_luma = 0.00035
+        cvvdp_min_luma = 0.0005
     if not cvvdp_max_luma:
-        cvvdp_max_luma = 0.0025
+        if video_transfer != 16:
+            cvvdp_max_luma = 0.0017
+        else:
+            cvvdp_max_luma = 0.00155
     if qadjust and qadjust_mode == 3:
         if not probes:
-            if qadjust_max_q - qadjust_min_q >= 20:
-                probes = 7
-                gamma = 1.0
-            elif 20 > qadjust_max_q - qadjust_min_q >= 15:
-                probes = 6
-                gamma = 1.2
-            else:
-                probes = 5
-                gamma = 1.4
-        elif probes >= 7:
-            gamma = 1.0
-        elif probes == 6:
-            gamma = 1.2
-        elif probes == 5:
-            gamma = 1.4
-        else:
-            logger.info("Number of probes set to 5.")
-            print("Number of probes set to 5.")
-            probes = 5
-            gamma = 1.4
+            probes = select_probe_count(qadjust_min_q, qadjust_max_q, 5, 10)
     if not qadjust_target:
         qadjust_target = 0
+    if cvvdp_probing_length:
+        cvvdp_probing_length = float(cvvdp_probing_length / 100)
 
     # Collect default values from commandline parameters
     if encoder == 'rav1e':
@@ -3523,6 +4209,7 @@ def main():
     qadjust_data = {}
     reuse_qadjust = False
     cvvdp_csv_exists = False
+    rewrite_cvvdp_table = False
     if qadjust_only:
         qadjust_reuse = False
 
@@ -3596,6 +4283,10 @@ def main():
                         elif qadjust_mode == 3:
                             cvvdp_q = qadjust_data['analysis_q']
                             cvvdp_curve = qadjust_data['cvvdp']['curve']
+                            cvvdp_table_file = os.path.join(output_folder, f"{output_name}_cvvdp_table.txt")
+                            knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 7)
+                            confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+                            rewrite_cvvdp_table = True
                             chunk_cvvdp_scores = [
                                 {
                                     "chunk": i['chunk_number'],
@@ -3604,10 +4295,16 @@ def main():
                                 }
                                 for i in qadjust_data['chunks']
                             ]
-                            new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, local_slope)
+                            new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, cvvdp_dark_boost)
                             new_q_by_chunk = {i['chunk']: i['q'] for i in new_crfs}
                             scale_by_chunk = {i['chunk']: i['scale'] for i in new_crfs}
                             base_q_by_chunk = {i['chunk']: i['q_undamped'] for i in new_crfs}
+                            luma_only_q_by_chunk = {row['chunk']: row['q_luma_only'] for row in new_crfs}
+                            raw_q_by_chunk = {row['chunk']: row['q_raw_no_boost'] for row in new_crfs}
+                            dark_weight_by_chunk = {i['chunk']: i['dark_weight'] for i in new_crfs}
+                            target_boost_pct_by_chunk = {i['chunk']: i['applied_target_boost_pct'] for i in new_crfs}
+                            original_target_by_chunk = {i['chunk']: i['original_target'] for i in new_crfs}
+                            effective_target_by_chunk = {i['chunk']: i['effective_target'] for i in new_crfs}
                             for i, chunk in enumerate(qadjust_data['chunks']):
                                 chunk_number = chunk['chunk_number']
                                 qadjust_data['chunks'][i] = {
@@ -3616,8 +4313,14 @@ def main():
                                     "cvvdp_score": chunk['cvvdp_score'],
                                     "average_luma": chunk['average_luma'],
                                     "luma_scale": scale_by_chunk[chunk_number],
+                                    "dark_weight": dark_weight_by_chunk[chunk_number],
+                                    "applied_target_boost_pct": target_boost_pct_by_chunk[chunk_number],
+                                    "original_target": original_target_by_chunk[chunk_number],
+                                    "effective_target": effective_target_by_chunk[chunk_number],
                                     "local_slope": int(local_slope),
-                                    "undamped_Q": base_q_by_chunk[chunk_number],
+                                    "raw_Q_no_boost": raw_q_by_chunk[chunk_number],
+                                    "raw_Q_boosted": base_q_by_chunk[chunk_number],
+                                    "luma_scaled_Q_no_boost": luma_only_q_by_chunk[chunk_number],
                                     "adjusted_Q": new_q_by_chunk[chunk_number]
                                 }
                             qadjust_data['target'] = qadjust_target
@@ -3638,6 +4341,8 @@ def main():
     if cvvdp_csv_exists:
         with open(probing_log_file, "w", newline="") as f:
             f.writelines(cvvdp_csv_lines)
+    if rewrite_cvvdp_table:
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 6)
 
     if qadjust_mode == 3:
         if cvvdp_config is not None:
@@ -3806,9 +4511,9 @@ def main():
                 print("The encoder parameters for the analysis:", encode_params_displist)
                 print("Running the analysis pass using your final CRF value.")
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time = datetime.now())
-                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode,
-                                              qadjust_cpu, cpu, qadjust_target,avg_bitrate, 0,'ssimu2', min_chunk_length, minkeyint, [], 0, 0, 0, qadjust_min_q,
-                                              qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+                chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'ssimu2', min_chunk_length, minkeyint, [], 0, 0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
+                                              cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
             # mode 2 = Butteraugli with two passes
             elif qadjust_mode == 2:
                 if qadjust_target == 0:
@@ -3842,8 +4547,8 @@ def main():
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass1_.hevc")
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
-                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1,'butter_pass1', min_chunk_length, minkeyint, [], 0,
-                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1, 'butter_pass1', min_chunk_length, minkeyint, [], 0, 0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model,
+                                              cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
                 modified_encode_commands = []
 
                 filtered_chunks = [c for c in chunklist if c.get("credits", 0) != 1]
@@ -3870,14 +4575,15 @@ def main():
                 else:
                     output_final_metrics = os.path.join(chunks_folder, f"encoded_chunk_pass2_.hevc")
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
-                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1,'butter_pass2', min_chunk_length, minkeyint, [], 0,
-                                              0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, 0, avg_bitrate_qadjust_pass1, 'butter_pass2', min_chunk_length, minkeyint, [], 0, 0, 0, qadjust_min_q, qadjust_max_q, cvvdp_model,
+                                              cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
             # CVVDP
             else:
                 logger.info("Started analysis using CVVDP.")
                 print("Started analysis using CVVDP.")
 
                 cvvdp_curve = []
+                cvvdp_table_file = os.path.join(output_folder, f"{output_name}_cvvdp_table.txt")
                 if os.path.exists(probing_log_file):
                     with open(probing_log_file, "r", newline="") as f:
                         probes_line = f.readline().strip()
@@ -3888,24 +4594,27 @@ def main():
                             "q": int(r["q"]),
                             "avg_bitrate": float(r["avg_bitrate"]),
                             "score": float(r["score"]),
-                            "slope": None if r["slope"] == '' else float(r["slope"]),
-                            "delta_bitrate": None if r["delta_bitrate"] == '' else float(r["delta_bitrate"]),
-                            "delta_score": None if r["delta_score"] == '' else float(r["delta_score"]),
-                            "kbps_per_0_1_cvvdp": None if r["kbps_per_0_1_cvvdp"] == '' else float(r["kbps_per_0_1_cvvdp"]),
+                            "slope": parse_float(r.get("slope")),
+                            "delta_bitrate": parse_float(r.get("delta_bitrate")),
+                            "delta_score": parse_float(r.get("delta_score")),
+                            "kbps_per_0_1_cvvdp": parse_float(r.get("kbps_per_0_1_cvvdp")),
+                            "eff_band": r.get("eff_band", "")
                         })
                     logger.info("Read the existing probe CSV file.")
                     print("Read the existing probe CSV file.")
                     csv_qs = ast.literal_eval(probes_line)
-                    probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma)
+                    probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma=1.0)
                     if csv_qs != probe_qs:
                         logger.error(f"Probe Q mismatch!\nCSV Qs:     {csv_qs}\nScript Qs:  {probe_qs}")
                         print(f"Probe Q mismatch!\nCSV Qs:     {csv_qs}\nScript Qs:  {probe_qs}\n")
                         print(f"Please delete the file {probing_log_file} and launch the script again to continue.")
                         sys.exit(1)
+                    qadjust_min_q = min(r["q"] for r in cvvdp_curve)
                 else:
-                    probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma)
-                    probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script, qadjust_original_file,
-                                                                                                                          video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, probe_length)
+                    probe_qs = generate_probe_q_range(probes, qadjust_min_q, qadjust_max_q, gamma=1.0)
+                    probe_encode_commands, probe_chunklist, probe_chunklist_dict, encode_params = preprocess_probe_chunks(stored_encode_params, video_length, credits_start_frame, encoder, chunks_folder, qadjust_cpu, encode_script,
+                                                                                                                          qadjust_original_file, video_width, video_height, qadjust_b, qadjust_c, scripts_folder, decode_method, probe_length,
+                                                                                                                          cvvdp_probing_skip, video_framerate, cvvdp_probing_length, cvvdp_probing_mode)
                     encode_params_displist = " ".join(encode_params)
                     encode_params_displist = encode_params_displist.replace('  ', ' ')
                     encode_params_displist = encode_params_displist.replace(f' --crf 0', '')
@@ -3915,17 +4624,18 @@ def main():
                         output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_probe_.hevc")
                     print("The encoder parameters for the analysis:", encode_params_displist)
                     logger.info(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
-                    print(f"Running {probes} probes at Q {probe_qs} to predict a Q/score curve.")
+                    print(f"\nRunning {probes} probes at Q {probe_qs} to predict a Q/score curve.\n")
 
-                    cvvdp_curve, qadjust_cycle = run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, video_length, fr, max_parallel_encodes, probe_chunklist_dict, reuse_qadjust, qadjust_skip,
-                                                                  qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
-                                                                  qadjust_mode, qadjust_cpu, cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config,
-                                                                  cvvdp_resizetodisplay, local_slope, probing_log_file)
+                    cvvdp_curve, qadjust_cycle = run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, video_length, fr, max_parallel_encodes, probe_chunklist_dict, reuse_qadjust, qadjust_skip, qadjust_original_file,
+                                                                  output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads, qadjust_mode, qadjust_cpu,
+                                                                  cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay,
+                                                                  local_slope, probing_log_file, cvvdp_dark_boost, cvvdp_probing_mode, cvvdp_table_file)
 
-                cvvdp_table_file = os.path.join(output_folder, f"{output_name}_cvvdp_table.txt")
-                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file)
+                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 7)
+                confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 6)
 
-                suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, "advanced", cvvdp_bias)
+                suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, cvvdp_bias)
                 if cvvdp_bias != 0:
                     logger.info(f"At CRF {suggested_q}, the estimated CVVDP score is {est_score:.4f} and estimated average bitrate {est_bitrate:.2f}.")
                     print(f"At CRF {suggested_q}, the estimated CVVDP score is {est_score:.4f} and estimated average bitrate {est_bitrate:.2f}.")
@@ -3941,16 +4651,18 @@ def main():
                     output_final_metrics = os.path.join(chunks_folder, "encoded_chunk_.hevc")
                 if qadjust_target == 0:
                     qadjust_target = est_score
-                """if qadjust_target == 0:
-                    while True:
-                        try:
-                            qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
-                            break
-                        except ValueError:
-                            print("Invalid input. Please enter a numeric (float) value.")"""
+                    if suggested_q != knee_row['q'] and cvvdp_bias == 0:
+                        logger.info(f"Using the transition band probe (Q{suggested_q}) nearest to the knee to set the target score.")
+                        print(f"Using the transition band probe (Q{suggested_q}) nearest to the knee to set the target score.")
+                    elif suggested_q == knee_row['q'] and cvvdp_bias == 0:
+                        logger.info(f"Using the knee point (Q{suggested_q}) to set the target score.")
+                        print(f"Using the knee point (Q{suggested_q}) to set the target score.")
+                    else:
+                        logger.info(f"Using Q{suggested_q} to set the target score.")
+                        print(f"Using Q{suggested_q} to set the target score.")
                 cvvdp_q = estimate_analysis_q(cvvdp_curve, qadjust_target)
-                logger.info(f"Running a full analysis at Q {cvvdp_q} to adjust Q per chunk using the curve.")
-                print(f"\nRunning a full analysis at Q {cvvdp_q} to adjust Q per chunk using the curve.")
+                logger.info(f"Running a full analysis at Q{cvvdp_q} to adjust Q per chunk using the curve.")
+                print(f"\nRunning a full analysis at Q{cvvdp_q} to adjust Q per chunk using the curve.")
                 for _, enc_cmd, _ in encode_commands:
                     for i, arg in enumerate(enc_cmd):
                         if arg.startswith('--crf'):
@@ -3971,8 +4683,8 @@ def main():
                                 enc_cmd[i] = '--merange 25'
                 run_encode(qadjust_cycle, chunklist, video_length, fr, max_parallel_encodes, encode_commands, chunklist_dict, reuse_qadjust, start_time=datetime.now())
                 chunklist = calculate_metrics(chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
-                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0,'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q,
-                                              cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope)
+                                              qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp', min_chunk_length, minkeyint, cvvdp_curve, cvvdp_q, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q,
+                                              cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
 
             if qadjust_only:
                 try:

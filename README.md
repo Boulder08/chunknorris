@@ -99,7 +99,7 @@ python chunk_norris.py encode_script [options]
 
 **--cpu**: Defines the '--cpu-used' parameter in aomenc, '--preset' in svt-av1 or '-s' in rav1e. Lower is better, but also slower.
 - Example: --cpu 6
-- Default: 3
+- Default: 2
 
 **--threads**: Defines the amount of threads each encoder may utilize. Keep it at least at 2 to allow threaded lookahead in aomenc and much better performance in svt-av1.
 - Example: --threads 4
@@ -215,6 +215,9 @@ Please note that mode 2 works only with SVT-AV1.
 - Example: --qadjust-mode 1
 - Default: 3
 
+**NOTE: if you don't set a target score, mode 3 is tuned to make your encodes efficient, i.e. it determines where any extra bitrate is having a diminishing effect on the final quality.**
+**The knee point is the CRF value where the difference is largest, and the transition band between the knee and the diminishing band is what the script will target if possible.**
+
 **--qadjust-reuse**: Use this parameter to reuse the existing qadjust JSON file. It will save time for example in case your final encode has crashed etc. and the encoding parameters or filtering remains the same.
 Note that the script will also ask you if you wish to reuse the JSON file in case it finds it while processing.
 Also if you change the minimum chunk length from the value that was used for calculating the metrics, the script will not allow you to use this parameter.
@@ -230,7 +233,7 @@ Also if you change the minimum chunk length from the value that was used for cal
 - Default: 1 for CVVDP, for other metrics 1 for resolutions less than HD, 3 for HD and above.
 
 **--qadjust-cpu**: Defines the '--preset' parameter used by the analysis for svt-av1
-- Default: 7
+- Default: 8
 
 **--qadjust-workers**: Defines how many parallel workers and threads (for Vship) will be launched. Avoid using too high values especially with UHD sources as GPU memory is often the limiting factor
 - Example: --qadjust-workers 4,1
@@ -238,17 +241,21 @@ Also if you change the minimum chunk length from the value that was used for cal
 
 **--qadjust-target**: Defines the target Butteraugli or CVVDP score.
 Note: if you already have run the analysis and the JSON file is found, you can use --qadjust-reuse and --qadjust-target to recalculate the final CRFs for chunks as needed.
-If you omit this parameter and you use qadjust-mode 3, the script will set the knee point score as the target (see --cvvdp-bias).
+If you omit this parameter and you use qadjust-mode 3, the script will set the score from first probe point in the transition band as the target (see --cvvdp-bias).
 - Example: --qadjust-target 9.8
 - Default: None
 
 **--qadjust-min-q** and **--qadjust-max-q**: Determines the range of allowed q for CVVDP based adjustment. This affects also the probing phase.
 - Example: --qadjust-min-q 15 --qadjust-max-q 30
-- Default: min 20, max 35
+- Default: min 16, max 35
 
-**--cvvdp-bias**: If you omit qadjust-target and use qadjust-mode 3, the script will target the score of the curve knee point. This parameter can be used to set an offset to the corresponding CRF (and subsequently the score).
+**--cvvdp-bias**: If you omit qadjust-target and use qadjust-mode 3, the script will target the transitio band. This parameter can be used to set an offset to the corresponding CRF (and subsequently the score).
 - Example: --cvvdp-bias -1
 - Default: 0
+
+**--cvvdp-probing-skip**: Determines in percentage where the probing range will begin considering the whole video. The default value 5 will make the range begin at 5% length from the beginning.
+- Example: --cvvdp-probing-skip 10
+- Default: 5
 
 **--cvvdp-min-luma** and **cvvdp-max-luma**: Determines which range of average luma will have a damping effect when the CVVDP based adjustment raises the q of a chunk due to a better score than the target.
 CVVDP tends to score a little too well with dark frames, and raising q will easily start removing details. These parameters damp the effect in order to prevent this from happening.
@@ -256,7 +263,7 @@ SDR material uses an exponential ramp and HDR a logarithmic one to determine the
 Chunks with average luma below cvvdp-min-luma will not have their q raised even if they score better than your set target is.
 
 - Example: --cvvdp-min-luma 0.00015 --cvvdp-max-luma 0.003
-- Default: min 0.00035, max 0.0025 for both SDR and HDR
+- Default: min 0.0005 for both; max 0.0017 for SDR and 0.00155 for HDR
 
 **--probes**: Defines how many probing encodes will be done for estimating the CVVDP score/q curve before the two refinement probes.
 The script will first find the "knee" point in the curve, i.e. the CRF value beyond which the increased bitrate yields less and less increase in quality. Then it runs two refinement probes on both sides of the knee and recalculates the knee point using all probes as reference.
@@ -276,6 +283,17 @@ Please note that presets.ini contains the key 'model_config_json' which you can 
 - Default: not set
 
 **--cvvdp-probing-only**: Runs only the initial probing phase and exits. The results are used if you run a normal process afterwards and the result csv is found from the output folder. This mode is useful if you want to see what kind of CVVDP scores and bitrates you would get at various CRFs.
+
+**--cvvdp-probing-length**: Defines in percentage how much of the video will be probed. The probes will be picked throughout the whole video to match (approximately) this amount.
+- Example: --cvvdp-probing-length 6
+- Default: 5
+
+**--cvvdp-probing-mode**: Defines the probing mode for CVVDP. The 'fast' mode skips some refinement probes and it's mostly useful for testing.
+- Example: --cvvdp-probing-mode fast
+- Default: full
+
+**--cvvdp-dark-boost**: Enabling this option gives a slight (max 0.02%) boost to CVVDP target scores for dark chunks. The cvvdp_min_luma and cvvdp_max_luma range is used to determine the amount of boosting.
+- Default: not set
 
 **encode_script**: Give the path (full or relative to the path where you run the script) to the Avisynth script you want to use for encoding.
 
