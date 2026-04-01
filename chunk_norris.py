@@ -777,6 +777,7 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
             replacements_list = {'--film-grain ': '--film-grain 0',
                                  '--photon-noise ': '--photon-noise 0',
                                  '--noise ': '--noise 0',
+                                 '--noise-chroma ': '--noise-chroma 0',
                                  '--preset ': f'--preset {qadjust_cpu}',
                                  '--tile-columns ': '--tile-columns 1',
                                  '--tile-rows ': '--tile-rows 0',
@@ -989,6 +990,7 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
         replacements_list = {'--film-grain ': '--film-grain 0',
                              '--photon-noise ': '--photon-noise 0',
                              '--noise ': '--noise 0',
+                             '--noise-chroma ': '--noise-chroma 0',
                              '--preset ': f'--preset {qadjust_cpu}',
                              '--tile-columns ': '--tile-columns 1',
                              '--tile-rows ': '--tile-rows 0',
@@ -2136,6 +2138,7 @@ def calculate_metrics(chunklist, skip, qadjust_original_file, output_final_metri
             "chunks": qadjust_data["chunks"]
         }
     elif qadjust_mode == 3:
+        qadjust_target = weighted_average
         new_crfs = adjust_crf_cvvdp(chunk_cvvdp_scores, cvvdp_q, qadjust_target, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, video_transfer, cvvdp_dark_boost)
         new_q_by_chunk = {row['chunk']: row['q'] for row in new_crfs}
         scale_by_chunk = {row['chunk']: row['scale'] for row in new_crfs}
@@ -2573,7 +2576,7 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
     print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 0)
     logger.info(f"Detected initial knee at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
     print(f"Detected initial knee at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
-    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 1)
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 1)
     for probe_q in ref_probe_qs:
         for _, enc_cmd, _ in probe_encode_commands:
             for i, arg in enumerate(enc_cmd):
@@ -2597,7 +2600,7 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
     logger.info(f"Detected knee after refining is at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
     print(f"Detected knee after refining is at Q{knee_row['q']}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
     if cvvdp_probing_mode != 'fast':
-        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 2)
+        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 2)
         logger.info(f'Refinement step 2: increasing resolution of the knee band by attempting to add more refinement probes around the knee.')
         print(f'Refinement step 2: increasing resolution of the knee band by attempting to add more refinement probes around the knee.\n')
         for probe_q in ref_probe_qs:
@@ -2622,7 +2625,7 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
         print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 2)
         logger.info(f"Detected knee after increased resolution is at Q{third_knee}, confidence score {confidence_score:.2f} and classified as {confidence_text}.")
         print(f"Detected knee after increased resolution is at Q{third_knee}, confidence score {confidence_score:.2f} and classified as {confidence_text}.\n")
-        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 3)  # Step 3 is the case where the knee is too close to either edge of the curve to be sure it's the correct one
+        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 3)  # Step 3 is the case where the knee is too close to either edge of the curve to be sure it's the correct one
         if ref_probe_qs:
             for probe_q in ref_probe_qs:
                 for _, enc_cmd, _ in probe_encode_commands:
@@ -2642,13 +2645,11 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
 
             recompute_curve_metrics(cvvdp_curve)
             knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 3)
-
-    if ref_probe_qs:
-        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 3)
+            confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+            print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 3)
 
     # Special corner case where knee is at third point from the start and thus uncertain (step 4)
-    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 4)
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 4)
     if ref_probe_qs:
         for probe_q in ref_probe_qs:
             for _, enc_cmd, _ in probe_encode_commands:
@@ -2667,13 +2668,12 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
             cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
         recompute_curve_metrics(cvvdp_curve)
-
-    # Special corner case where there is a gap of at least 3 CRF points between the knee and the previous probing point (step 5)
-    knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 4)
-    if ref_probe_qs:
+        knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 4)
         confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
         print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 4)
-    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, None, 5)
+
+    # Special corner case where there is a gap of at least 3 CRF points between the knee and the previous probing point (step 5)
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 5)
     if ref_probe_qs:
         for probe_q in ref_probe_qs:
             for _, enc_cmd, _ in probe_encode_commands:
@@ -2694,15 +2694,12 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
 
         recompute_curve_metrics(cvvdp_curve)
         knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 5)
-
-    if ref_probe_qs:
         confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
         print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 5)
 
     if cvvdp_probing_mode != 'fast':
         # Special corner case where the bands 'diminishing' and 'transition' have a gap of at least 3 CRF points between them
-        curvatures = compute_curvature(cvvdp_curve)
-        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, curvatures, 6)
+        ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 6)
         if ref_probe_qs:
             for probe_q in ref_probe_qs:
                 for _, enc_cmd, _ in probe_encode_commands:
@@ -2722,9 +2719,48 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
                 cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
             recompute_curve_metrics(cvvdp_curve)
+            knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 6)
+            confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+            print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 6)
 
+    # Special corner case where the 'diminishing' band doesn't exist
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 7)
+    if ref_probe_qs:
+        for probe_q in ref_probe_qs:
+            for _, enc_cmd, _ in probe_encode_commands:
+                for i, arg in enumerate(enc_cmd):
+                    if arg.startswith('--crf'):
+                        enc_cmd[i] = f'--crf {probe_q}'
+                        break
+
+            logger.info(f'Estimated diminishing band probing at Q{probe_q}')
+            print(f'Estimated diminishing band probing at Q{probe_q}')
+
+            run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+            score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                      qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q,
+                                      cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+
+            cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+        recompute_curve_metrics(cvvdp_curve)
+
+    band_order = {
+        "diminishing": 0,
+        "transition": 1,
+        "knee_band": 2,
+        "efficient": 3,
+    }
+    prev_band = None
     for r in cvvdp_curve:
-        r["eff_band"] = classify_eff_band(r, knee_row) if knee_row else ""
+        band = classify_eff_band(r, knee_row) if knee_row else ""
+        # enforce monotonic progression
+        if prev_band and band:
+            if band_order[band] < band_order[prev_band]:
+                band = prev_band
+
+        r["eff_band"] = band
+        prev_band = band
 
     cvvdp_curve = monotonic_smooth(cvvdp_curve)
     fieldnames = sorted({key for row in cvvdp_curve for key in row.keys()})
@@ -2855,12 +2891,19 @@ def classify_eff_band(row, knee_row):
 
 
 def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step):
-    lines = [
-        f"\nStep {step}:",
-        f"Detected knee at Q{knee_row['q']}, "
-        f"confidence score {confidence_score:.2f} "
-        f"and classified as {confidence_text}.\n"
-    ]
+    if step < 7:
+        lines = [
+            f"\nStep {step}:",
+            f"Detected knee at Q{knee_row['q']}, "
+            f"confidence score {confidence_score:.2f} "
+            f"and classified as {confidence_text}.\n"
+        ]
+    else:
+        lines = [
+            f"Detected knee at Q{knee_row['q']}, "
+            f"confidence score {confidence_score:.2f} "
+            f"and classified as {confidence_text}.\n"
+        ]
 
     # --- widths ---
     q_width = max(len(str(r['q'])) for r in cvvdp_curve)
@@ -2924,7 +2967,7 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
         lines.append(line)
 
     # --- explanation ---
-    if knee_i is not None and step > 5:
+    if knee_i is not None and step > 6:
         q_knee = knee_row["q"]
         left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
         right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
@@ -2954,21 +2997,32 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
 
 
 def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, step):
-    if step == 6:
+    if step == 7:
         logger.info(
             f"Detected knee at Q{knee_row['q']}, "
             f"confidence score {confidence_score:.2f} "
             f"and classified as {confidence_text}."
         )
 
-    # --- compute eff_band once ---
+    # --- compute eff_band once with monotonic enforcement ---
+    band_order = {
+        "diminishing": 0,
+        "transition": 1,
+        "knee_band": 2,
+        "efficient": 3,
+    }
+    prev_band = None
     for r in cvvdp_curve:
-        r["eff_band"] = classify_eff_band(r, knee_row) if knee_row else ""
+        band = classify_eff_band(r, knee_row) if knee_row else ""
+        if prev_band and band_order[band] < band_order[prev_band]:
+            band = prev_band
+        r["eff_band"] = band
+        prev_band = band
 
     output = format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step)
 
     # console
-    if step == 6:
+    if step == 7:
         print(output)
 
     # file
@@ -3037,7 +3091,9 @@ def detect_knee_by_curvature(cvvdp_curve, step):
     prev_z = None
     best_i = None
 
-    for i in range(3, n - 1):
+    start_i = 3 if step == 0 else 2
+
+    for i in range(start_i, n - 1):
         metric = metrics[i]
         if not isinstance(metric, (int, float)):
             continue
@@ -3049,7 +3105,6 @@ def detect_knee_by_curvature(cvvdp_curve, step):
             continue
 
         # --- monotonic slope constraint ---
-        # Only consider region where slope is decreasing (efficiency drop begins)
         if s_curr >= s_prev:
             continue
 
@@ -3076,7 +3131,7 @@ def detect_knee_by_curvature(cvvdp_curve, step):
     # --- fallback: no peak found → use strongest early candidate ---
     if best_i is None:
         best_score = None
-        for i in range(3, n - 1):
+        for i in range(start_i, n - 1):
             metric = metrics[i]
             if not isinstance(metric, (int, float)):
                 continue
@@ -3091,10 +3146,9 @@ def detect_knee_by_curvature(cvvdp_curve, step):
 
     if best_i is None:
         return None, None
-    # --- print false knees only if a different knee was selected ---
     else:
         for fk_i, fk_q, fk_z in false_knees:
-            if fk_i != best_i and step < 7:
+            if fk_i != best_i and step < 8:
                 msg = f"Detected false knee at Q{fk_q} (z={fk_z:.2f}), ignoring."
                 logger.info(msg)
                 print(msg + '\n')
@@ -3216,12 +3270,11 @@ def midpoint_probe(q0, q1, existing_qs):
     return mid
 
 
-def stepped_probe(q1, q2, existing_qs, step):
-    # ensure probe lands inside the interval but toward the lower-Q side
+def stepped_probe(q1, q2, existing_qs, offset):
     lo = min(q1, q2)
     hi = max(q1, q2)
 
-    probe = hi - step  # place probe toward lower-Q side
+    probe = hi - offset
 
     if probe in existing_qs:
         return None
@@ -3231,24 +3284,18 @@ def stepped_probe(q1, q2, existing_qs, step):
 
 
 def try_probe(curve, i1, i2, existing_qs, opposite, step):
-    """
-    Attempt to generate a probe between two curve indices.
-    Uses midpoint for step=1 (existing behavior).
-    Uses stepped probe for step>1.
-    """
     q1 = curve[i1]["q"]
     q2 = curve[i2]["q"]
 
-    # --- step 1: midpoint, step 2+: stepped ---
     if step == 1:
         probe = midpoint_probe(q1, q2, existing_qs)
     else:
-        probe = stepped_probe(q1, q2, existing_qs, step)
+        # fixed offset instead of using step
+        probe = stepped_probe(q1, q2, existing_qs, offset=1)
 
     if probe is not None:
         return probe
 
-    # --- try opposite side ---
     if opposite:
         q1 = curve[opposite[0]]["q"]
         q2 = curve[opposite[1]]["q"]
@@ -3256,7 +3303,7 @@ def try_probe(curve, i1, i2, existing_qs, opposite, step):
         if step == 1:
             probe = midpoint_probe(q1, q2, existing_qs)
         else:
-            probe = stepped_probe(q1, q2, existing_qs, step)
+            probe = stepped_probe(q1, q2, existing_qs, offset=1)
 
         if probe is not None:
             return probe
@@ -3264,8 +3311,8 @@ def try_probe(curve, i1, i2, existing_qs, opposite, step):
     return None
 
 
-def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
-    if knee_i is None or len(curve) < 3:
+def add_refinement_probes(curve, knee_i, knee_row, step):
+    if knee_i is None or len(curve) < 4:
         msg = "Curve too short or knee index None; no final probe added."
         print(msg)
         logger.info(msg)
@@ -3324,15 +3371,8 @@ def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
     elif step == 3:
         qs = []
 
-        # --- knee near start ---
-        if knee_i <= 3 and ((
-                (curve[knee_i]["q"] - curve[0]["q"]) > 8 and
-                (curve[knee_i]["q"] - curve[knee_i - 1]["q"]) > 1
-        ) or (knee_i < 3)):
-            if knee_i == 1:
-                primary = (0, 1)
-                opposite = (1, 2)
-            elif knee_i == 2:
+        if knee_i in (2, 3):
+            if knee_i == 2:
                 primary = (1, 2)
                 opposite = (0, 1)
             else:
@@ -3343,14 +3383,9 @@ def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
             if probe_q is not None:
                 qs.append(probe_q)
 
-        # --- knee near end ---
-        elif knee_i in (n - 3, n - 2):
-            if knee_i == n - 2:
-                primary = (n - 2, n - 1)
-                opposite = (n - 3, n - 2)
-            else:  # knee_i == n - 3
-                primary = (n - 3, n - 2)
-                opposite = (n - 2, n - 1)
+        if knee_i == n - 2:
+            primary = (n - 2, n - 1)
+            opposite = (n - 3, n - 2)
 
             probe_q = try_probe(curve, primary[0], primary[1], existing_qs, opposite, step)
             if probe_q is not None:
@@ -3401,27 +3436,41 @@ def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
         return qs
 
     # -------------------------
-    # STEP 5: gap-before-knee
+    # STEP 5: gap near knee (before and after)
     # -------------------------
     elif step == 5:
+        qs = []
+        q_knee = curve[knee_i]["q"]
+
         if knee_i > 0:
             q_prev = curve[knee_i - 1]["q"]
-            q_knee = curve[knee_i]["q"]
-            gap = q_knee - q_prev
+            gap_left = q_knee - q_prev
 
-            if gap > 2:
+            if gap_left > 2:
                 probe_q = q_knee - 1
-
                 if probe_q not in existing_qs:
-                    msg = (
-                        f"Step {step}: over 2 CRF points gap before knee at Q{knee_row['q']}, "
-                        f"inserting final refinement probe at Q{probe_q}."
-                    )
-                    print(msg + '\n')
-                    logger.info(msg)
-                    return [probe_q]
+                    qs.append(probe_q)
 
-        msg = f"Step {step}: no refinement probe added; the gap before the knee point is not over 2 CRF points."
+        if knee_i < n - 1:
+            q_next = curve[knee_i + 1]["q"]
+            gap_right = q_next - q_knee
+
+            if gap_right > 2:
+                probe_q = q_knee + 1
+                if probe_q not in existing_qs:
+                    qs.append(probe_q)
+
+        if qs:
+            probes = ", ".join(f"Q{q}" for q in qs)
+            msg = (
+                f"Step {step}: gap over 2 CRF points near knee at Q{knee_row['q']}, "
+                f"inserting final refinement probe(s) at {probes}."
+            )
+            print(msg + '\n')
+            logger.info(msg)
+            return qs
+
+        msg = f"Step {step}: no refinement probe added; no significant gap near the knee."
         print(msg + '\n')
         logger.info(msg)
         return []
@@ -3429,20 +3478,16 @@ def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
     # -------------------------
     # STEP 6: transition → diminishing boundary refinement
     # -------------------------
-    elif step == 6 and curvatures is not None:
+    elif step == 6:
         boundary_i = None
 
         for i in range(0, knee_i - 1):
             row_curr = curve[i]
             row_next = curve[i + 1]
 
-            if row_curr["kbps_per_0_1_cvvdp"] is None:
-                continue
-            if row_next["kbps_per_0_1_cvvdp"] is None:
-                continue
-
-            band_curr = classify_eff_band(row_curr, knee_row)
-            band_next = classify_eff_band(row_next, knee_row)
+            # use precomputed eff_band
+            band_curr = row_curr.get("eff_band", "")
+            band_next = row_next.get("eff_band", "")
 
             if band_curr == "diminishing" and band_next == "transition":
                 boundary_i = i
@@ -3465,7 +3510,37 @@ def add_refinement_probes(curve, knee_i, knee_row, curvatures, step):
                     return [probe_q]
 
         msg = f"Step {step}: no refinement probe added; the gap between the boundary of 'transition' and 'diminishing' bands is not over 2 CRF points."
-        print(msg)
+        print(msg + '\n')
+        logger.info(msg)
+        return []
+
+    # -------------------------
+    # STEP 7: missing diminishing band
+    # -------------------------
+    elif step == 7:
+        has_diminishing = False
+
+        for row in curve:
+            band = row.get("eff_band", "")
+            if band == "diminishing":
+                has_diminishing = True
+                break
+
+        if not has_diminishing:
+            q0 = curve[0]["q"]
+            q1 = curve[1]["q"]
+            probe_q = (q0 + q1) // 2
+            if probe_q not in existing_qs:
+                msg = (
+                    f"Step {step}: no 'diminishing' band detected, adding refinement probe "
+                    f"between first two points at Q{probe_q}."
+                )
+                print(msg + '\n')
+                logger.info(msg)
+                return [probe_q]
+
+        msg = f"Step {step}: diminishing band present; no refinement probe added."
+        print(msg + '\n')
         logger.info(msg)
         return []
 
@@ -3507,8 +3582,20 @@ def suggest_q_and_target_cvvdp(cvvdp_curve, bias):
         suggested_q = (curve[0]["q"] + curve[-1]["q"]) // 2
     else:
         # --- classify all rows ---
+        band_order = {
+            "diminishing": 0,
+            "transition": 1,
+            "knee_band": 2,
+            "efficient": 3,
+        }
+        prev_band = None
         for r in curve:
-            r["eff_band"] = classify_eff_band(r, knee_row)
+            band = classify_eff_band(r, knee_row)
+            # enforce monotonic progression: do not regress to a lower-efficiency band
+            if prev_band and band_order[band] < band_order[prev_band]:
+                band = prev_band
+            r["eff_band"] = band
+            prev_band = band
 
         # --- collect transition band ---
         transition_rows = [r for r in curve if r["eff_band"] == "transition"]
@@ -3697,7 +3784,7 @@ def main():
     parser.add_argument('--qadjust-b', nargs='?', default=-0.5, type=float)
     parser.add_argument('--qadjust-c', nargs='?', default=0.25, type=float)
     parser.add_argument('--qadjust-skip', nargs='?', type=int)
-    parser.add_argument('--qadjust-cpu', nargs='?', default=8, type=int)
+    parser.add_argument('--qadjust-cpu', nargs='?', default=7, type=int)
     parser.add_argument('--qadjust-workers', nargs='?', type=str)
     parser.add_argument('--qadjust-target', nargs='?', type=float)
     parser.add_argument('--qadjust-min-q', nargs='?', default=16, type=int)
@@ -4261,7 +4348,7 @@ def main():
                                     if qadjust_mode == 2:
                                         qadjust_target = float(input("\nPlease enter the target value for Butteraugli (for example 1.4): "))
                                     elif qadjust_mode == 3:
-                                        qadjust_target = qadjust_data['target']
+                                        qadjust_target = qadjust_data['cvvdp_weighted_score']
                                         logger.info(f"Using qadjust target score {qadjust_target} from the existing data file.")
                                         print(f"Using qadjust target score {qadjust_target} from the existing data file.")
                                         # qadjust_target = float(input("\nPlease enter the target value for CVVDP (for example 9.8): "))
@@ -4282,6 +4369,7 @@ def main():
                             qadjust_data['qadjust_target'] = qadjust_target
                         elif qadjust_mode == 3:
                             cvvdp_q = qadjust_data['analysis_q']
+                            qadjust_target = qadjust_data['cvvdp_weighted_score']
                             cvvdp_curve = qadjust_data['cvvdp']['curve']
                             cvvdp_table_file = os.path.join(output_folder, f"{output_name}_cvvdp_table.txt")
                             knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 7)
@@ -4631,9 +4719,9 @@ def main():
                                                                   cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay,
                                                                   local_slope, probing_log_file, cvvdp_dark_boost, cvvdp_probing_mode, cvvdp_table_file)
 
-                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 7)
+                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 8)
                 confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 6)
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 7)
 
                 suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, cvvdp_bias)
                 if cvvdp_bias != 0:
