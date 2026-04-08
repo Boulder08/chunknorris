@@ -340,6 +340,8 @@ def create_scxvid_file(scene_change_csv, scd_tonemap, encode_script, cudasynth, 
     with open(qpfile, "w") as file:
         file.write(scenechangelist)
 
+    return qpfile
+
 
 # Function to find the scene change file recursively
 def find_scene_change_file(start_dir, filename):
@@ -413,6 +415,33 @@ def create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene
     with open(qpfile, "w") as file:
         file.write(scenechangelist)
 
+    return qpfile
+
+
+def run_scene_change_detection(scd_method, output_folder_name, encode_script, scd_script, scene_change_file_path, downscale_scd, scd_tonemap, cudasynth):
+    qpfile_path = ''
+    if scd_method == 0:
+        try:
+            scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.json")
+            qpfile_path = create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, downscale_scd)
+        except Exception as e:
+            logger.info(f"Scene change detection using av-scenechange failed, exception code {e}. Attempting to use SCXViD.")
+            print("Scene change detection using av-scenechange failed. Attempting to use SCXViD.\n")
+            try:
+                scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+                qpfile_path = create_scxvid_file(scene_change_csv, scd_tonemap, encode_script, cudasynth, downscale_scd, scd_script, scene_change_file_path)
+            except Exception as e:
+                logger.info(f"Scene change detection using SCXViD failed, exception code {e}. Exiting.")
+                print("Scene change detection using SCXViD failed. Exiting.")
+                sys.exit(1)
+    elif scd_method == 1:
+        scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.json")
+        qpfile_path = create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, downscale_scd)
+    elif scd_method == 2:
+        scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
+        qpfile_path = create_scxvid_file(scene_change_csv, scd_tonemap, encode_script, cudasynth, downscale_scd, scd_script, scene_change_file_path)
+
+    return qpfile_path
 
 def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
                      output_grain_table_baseline):
@@ -610,20 +639,11 @@ def create_fgs_table(encode_params, output_grain_table, scripts_folder, video_wi
         print("The FGS grain table file exists already, skipping creation.\n")
 
 
-def convert_qp_to_scene_changes(encode_script):
+def convert_qp_to_scene_changes(scene_change_csv):
     scene_changes = []
-    # Find the scene change file recursively
-    scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
-    scene_change_file_path = os.path.dirname(encode_script)
-    scene_change_file_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
-
-    if scene_change_file_path is None:
-        logger.error(f"Scene change file not found: {scene_change_filename}")
-        print(f"Scene change file not found: {scene_change_filename}")
-        sys.exit(1)
 
     # Read scene changes from the file
-    with open(scene_change_file_path, "r") as scene_change_file:
+    with open(scene_change_csv, "r") as scene_change_file:
         for line in scene_change_file:
             parts = line.strip().split()
             if len(parts) == 2:
@@ -1594,12 +1614,16 @@ def concatenate(chunks_folder, input_files, output_final, fr, use_mkvmerge, enco
 def read_presets(presets, encoder):
     scriptdir = os.path.dirname(os.path.realpath(__file__))
     presetpath = os.path.join(scriptdir, 'presets.ini')
-    config = configparser.ConfigParser()
+    if not os.path.isfile(presetpath):
+        logger.error("Presets.ini could not be found from the script directory.")
+        print("\nPresets.ini could not be found from the script directory, exiting..\n")
+        sys.exit(1)
+    config = configparser.ConfigParser(strict=False)
     try:
         config.read(presetpath)
     except Exception as e:
-        logger.error(f"Presets.ini could not be found from the script directory. Exception code {e}")
-        print("\nPresets.ini could not be found from the script directory, exiting..\n")
+        logger.error(f"Presets.ini could not be read, please check the content for errors. Exception code {e}")
+        print(f"\nPresets.ini could not be read, please check the content for errors. Exception code {e}.\n")
         sys.exit(1)
     default_section = encoder + '-default'
     try:
@@ -2723,8 +2747,33 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
             confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
             print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 6)
 
-    # Special corner case where the 'diminishing' band doesn't exist
+    # Special corner case where the transition band begins at the third curve point (step 7)
     ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 7)
+    if ref_probe_qs:
+        for probe_q in ref_probe_qs:
+            for _, enc_cmd, _ in probe_encode_commands:
+                for i, arg in enumerate(enc_cmd):
+                    if arg.startswith('--crf'):
+                        enc_cmd[i] = f'--crf {probe_q}'
+                        break
+
+            logger.info(f'Transition band resolution improvement probing at Q{probe_q}')
+            print(f'Transition band resolution improvement probing at Q{probe_q}')
+
+            run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+            score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers, qadjust_threads,
+                                      qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model,
+                                      cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+
+            cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+        recompute_curve_metrics(cvvdp_curve)
+        knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 7)
+        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 7)
+
+    # Special corner case where the 'diminishing' band doesn't exist
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 8)
     if ref_probe_qs:
         for probe_q in ref_probe_qs:
             for _, enc_cmd, _ in probe_encode_commands:
@@ -2891,7 +2940,7 @@ def classify_eff_band(row, knee_row):
 
 
 def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step):
-    if step < 7:
+    if step < 8:
         lines = [
             f"\nStep {step}:",
             f"Detected knee at Q{knee_row['q']}, "
@@ -2967,7 +3016,7 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
         lines.append(line)
 
     # --- explanation ---
-    if knee_i is not None and step > 6:
+    if knee_i is not None and step > 7:
         q_knee = knee_row["q"]
         left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
         right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
@@ -2997,7 +3046,7 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
 
 
 def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, step):
-    if step == 7:
+    if step == 8:
         logger.info(
             f"Detected knee at Q{knee_row['q']}, "
             f"confidence score {confidence_score:.2f} "
@@ -3022,7 +3071,7 @@ def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, conf
     output = format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step)
 
     # console
-    if step == 7:
+    if step == 8:
         print(output)
 
     # file
@@ -3148,7 +3197,7 @@ def detect_knee_by_curvature(cvvdp_curve, step):
         return None, None
     else:
         for fk_i, fk_q, fk_z in false_knees:
-            if fk_i != best_i and step < 8:
+            if fk_i != best_i and step < 9:
                 msg = f"Detected false knee at Q{fk_q} (z={fk_z:.2f}), ignoring."
                 logger.info(msg)
                 print(msg + '\n')
@@ -3464,7 +3513,7 @@ def add_refinement_probes(curve, knee_i, knee_row, step):
             probes = ", ".join(f"Q{q}" for q in qs)
             msg = (
                 f"Step {step}: gap over 2 CRF points near knee at Q{knee_row['q']}, "
-                f"inserting final refinement probe(s) at {probes}."
+                f"adding refinement probe(s) at {probes}."
             )
             print(msg + '\n')
             logger.info(msg)
@@ -3485,7 +3534,6 @@ def add_refinement_probes(curve, knee_i, knee_row, step):
             row_curr = curve[i]
             row_next = curve[i + 1]
 
-            # use precomputed eff_band
             band_curr = row_curr.get("eff_band", "")
             band_next = row_next.get("eff_band", "")
 
@@ -3503,7 +3551,7 @@ def add_refinement_probes(curve, knee_i, knee_row, step):
                 if probe_q not in existing_qs:
                     msg = (
                         f"Step {step}: gap at transition → diminishing boundary, Q{q_high} → Q{q_low}, is over 2 CRF points "
-                        f"(knee detected at Q{knee_row['q']}), inserting final refinement probe at Q{probe_q}."
+                        f"(knee detected at Q{knee_row['q']}), adding refinement probe at Q{probe_q}."
                     )
                     print(msg + '\n')
                     logger.info(msg)
@@ -3515,9 +3563,39 @@ def add_refinement_probes(curve, knee_i, knee_row, step):
         return []
 
     # -------------------------
-    # STEP 7: missing diminishing band
+    # STEP 7: transition starts at third point
     # -------------------------
     elif step == 7:
+        first_transition_i = None
+
+        for i, row in enumerate(curve):
+            if row.get("eff_band", "") == "transition":
+                first_transition_i = i
+                break
+
+        if first_transition_i == 2:
+            q0 = curve[0]["q"]
+            q1 = curve[1]["q"]
+            probe_q = (q0 + q1) // 2
+
+            if probe_q not in existing_qs:
+                msg = (
+                    f"Step {step}: transition band begins at third point (Q{curve[2]['q']}), "
+                    f"adding refinement probe at Q{probe_q}."
+                )
+                print(msg + '\n')
+                logger.info(msg)
+                return [probe_q]
+
+        msg = f"Step {step}: no refinement probe added; transition band does not start at third point."
+        print(msg + '\n')
+        logger.info(msg)
+        return []
+
+    # -------------------------
+    # STEP 8: missing diminishing band
+    # -------------------------
+    elif step == 8:
         has_diminishing = False
 
         for row in curve:
@@ -4332,7 +4410,7 @@ def main():
             if os.path.exists(qadjust_results_file) and not qadjust_only and qadjust:
                 if not qadjust_reuse:
                     user_choice = input("\nThe qadjust analysis file already exists. Would you like to use the existing results (Y/Enter) or recreate the file (any other key)? ").strip().lower()
-                    if user_choice == 'y' or user_choice == '':
+                    if user_choice in ('y', ''):
                         reuse_qadjust = True
                 else:
                     reuse_qadjust = True
@@ -4530,13 +4608,11 @@ def main():
     # Detect scene changes
     scd_script = os.path.splitext(os.path.basename(encode_script))[0] + "_scd.avs"
     scd_script = os.path.join(os.path.dirname(encode_script), scd_script)
-    if scd_method == 1:
-        scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.json")
-        create_avscenechange_file(scene_change_csv, encode_script, scd_script, scene_change_file_path, downscale_scd)
-    elif scd_method == 2:
-        scene_change_csv = os.path.join(output_folder_name, f"scene_changes_{os.path.splitext(os.path.basename(encode_script))[0]}.csv")
-        create_scxvid_file(scene_change_csv, scd_tonemap, encode_script, cudasynth, downscale_scd, scd_script, scene_change_file_path)
-    scene_changes = convert_qp_to_scene_changes(encode_script)
+    scene_change_filename = os.path.splitext(os.path.basename(encode_script))[0] + ".qp.txt"
+    qpfile_path = find_scene_change_file(scene_change_file_path, scene_change_filename)
+    if not qpfile_path:
+        qpfile_path = run_scene_change_detection(scd_method, output_folder_name, encode_script, scd_script, scene_change_file_path, downscale_scd, scd_tonemap, cudasynth)
+    scene_changes = convert_qp_to_scene_changes(qpfile_path)
     logger.info("Finished processing the scene change data.")
     if scdetect_only:
         print("Scene change detection complete.\n")
@@ -4719,9 +4795,9 @@ def main():
                                                                   cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay,
                                                                   local_slope, probing_log_file, cvvdp_dark_boost, cvvdp_probing_mode, cvvdp_table_file)
 
-                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 8)
+                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 9)
                 confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 7)
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 8)
 
                 suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, cvvdp_bias)
                 if cvvdp_bias != 0:
@@ -4740,8 +4816,8 @@ def main():
                 if qadjust_target == 0:
                     qadjust_target = est_score
                     if suggested_q != knee_row['q'] and cvvdp_bias == 0:
-                        logger.info(f"Using the transition band probe (Q{suggested_q}) nearest to the knee to set the target score.")
-                        print(f"Using the transition band probe (Q{suggested_q}) nearest to the knee to set the target score.")
+                        logger.info(f"Using the transition band probe (Q{suggested_q}) farthest from the knee to set the target score.")
+                        print(f"Using the transition band probe (Q{suggested_q}) farthest from the knee to set the target score.")
                     elif suggested_q == knee_row['q'] and cvvdp_bias == 0:
                         logger.info(f"Using the knee point (Q{suggested_q}) to set the target score.")
                         print(f"Using the knee point (Q{suggested_q}) to set the target score.")
