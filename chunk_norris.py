@@ -2793,6 +2793,31 @@ def run_cvvdp_probes(probes, probe_qs, probe_encode_commands, probe_chunklist, v
             cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
 
         recompute_curve_metrics(cvvdp_curve)
+        knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 8)
+        confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 8)
+
+    # Special corner case where the knee is near the end of the curve and there is a gap of at least 3 CRF points between it and the next probing point
+    ref_probe_qs = add_refinement_probes(cvvdp_curve, knee_i, knee_row, 9)
+    if ref_probe_qs:
+        for probe_q in ref_probe_qs:
+            for _, enc_cmd, _ in probe_encode_commands:
+                for i, arg in enumerate(enc_cmd):
+                    if arg.startswith('--crf'):
+                        enc_cmd[i] = f'--crf {probe_q}'
+                        break
+
+            logger.info(f'Large gap refinement probing at Q{probe_q}')
+            print(f'Large gap refinement probing at Q{probe_q}')
+
+            run_encode(qadjust_cycle, probe_chunklist, video_length, fr, max_parallel_encodes, probe_encode_commands, probe_chunklist_dict, reuse_qadjust, start_time=datetime.now())
+            score = calculate_metrics(probe_chunklist, qadjust_skip, qadjust_original_file, output_final_metrics, encoder, q, br, qadjust_results_file, video_matrix, video_transfer, video_primaries, chroma_location, qadjust_workers,
+                                      qadjust_threads, qadjust_mode, qadjust_cpu, cpu, qadjust_target, avg_bitrate, 0, 'cvvdp_probing', min_chunk_length, minkeyint, cvvdp_curve, 0, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q,
+                                      cvvdp_model, cvvdp_config, cvvdp_resizetodisplay, local_slope, cvvdp_dark_boost)
+
+            cvvdp_curve.append({'q': probe_q, 'avg_bitrate': avg_bitrate, 'score': score})
+
+        recompute_curve_metrics(cvvdp_curve)
 
     band_order = {
         "diminishing": 0,
@@ -3046,7 +3071,7 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
 
 
 def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, step):
-    if step == 8:
+    if step == 9:
         logger.info(
             f"Detected knee at Q{knee_row['q']}, "
             f"confidence score {confidence_score:.2f} "
@@ -3071,7 +3096,7 @@ def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, conf
     output = format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step)
 
     # console
-    if step == 8:
+    if step == 9:
         print(output)
 
     # file
@@ -3197,7 +3222,7 @@ def detect_knee_by_curvature(cvvdp_curve, step):
         return None, None
     else:
         for fk_i, fk_q, fk_z in false_knees:
-            if fk_i != best_i and step < 9:
+            if fk_i != best_i and step < 10:
                 msg = f"Detected false knee at Q{fk_q} (z={fk_z:.2f}), ignoring."
                 logger.info(msg)
                 print(msg + '\n')
@@ -3618,6 +3643,32 @@ def add_refinement_probes(curve, knee_i, knee_row, step):
                 return [probe_q]
 
         msg = f"Step {step}: diminishing band present; no refinement probe added."
+        print(msg + '\n')
+        logger.info(msg)
+        return []
+
+    # -------------------------
+    # STEP 9: tail refinement (knee near end)
+    # -------------------------
+    elif step == 9:
+        if knee_i >= n - 3:
+            q_last = curve[-1]["q"]
+            q_prev = curve[-2]["q"]
+            gap = q_last - q_prev
+
+            if gap > 2:
+                probe_q = (q_last + q_prev) // 2
+
+                if probe_q not in existing_qs:
+                    msg = (
+                        f"Step {step}: knee near end at Q{knee_row['q']} with large tail gap "
+                        f"(Q{q_prev} → Q{q_last}), adding refinement probe at Q{probe_q}."
+                    )
+                    print(msg + '\n')
+                    logger.info(msg)
+                    return [probe_q]
+
+        msg = f"Step {step}: no refinement probe added; tail region sufficiently sampled."
         print(msg + '\n')
         logger.info(msg)
         return []
@@ -4795,9 +4846,9 @@ def main():
                                                                   cpu, qadjust_target, min_chunk_length, minkeyint, cvvdp_curve, cvvdp_min_luma, cvvdp_max_luma, qadjust_min_q, qadjust_max_q, cvvdp_model, cvvdp_config, cvvdp_resizetodisplay,
                                                                   local_slope, probing_log_file, cvvdp_dark_boost, cvvdp_probing_mode, cvvdp_table_file)
 
-                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 9)
+                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 10)
                 confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 8)
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 9)
 
                 suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, cvvdp_bias)
                 if cvvdp_bias != 0:
