@@ -806,6 +806,11 @@ def preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, st
             encode_params_original = [
                 next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
                 for x in encode_params_original
+                if not x.startswith('--fgs-table ')
+            ]
+            encode_params_original = [
+                next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
+                for x in encode_params_original
             ]
             if not any('--tile-columns' in param for param in encode_params_original):
                 encode_params_original.append('--tile-columns 1')
@@ -1016,6 +1021,11 @@ def preprocess_probe_chunks(stored_encode_params, video_length, credits_start_fr
                              '--tile-rows ': '--tile-rows 0',
                              '--enable-dlf ': '--enable-dlf 2',
                              '--complex-hvs ': '--complex-hvs 0'}
+        encode_params_original = [
+            next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
+            for x in encode_params_original
+            if not x.startswith('--fgs-table ')
+        ]
         encode_params_original = [
             next((replacements_list[key] for key in replacements_list if x.startswith(key)), x)
             for x in encode_params_original
@@ -2964,8 +2974,8 @@ def classify_eff_band(row, knee_row):
         return "efficient"
 
 
-def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step):
-    if step < 8:
+def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step, reuse_data=False):
+    if step < 9:
         lines = [
             f"\nStep {step}:",
             f"Detected knee at Q{knee_row['q']}, "
@@ -3041,7 +3051,7 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
         lines.append(line)
 
     # --- explanation ---
-    if knee_i is not None and step > 7:
+    if knee_i is not None and (step > 8 or reuse_data):
         q_knee = knee_row["q"]
         left = cvvdp_curve[knee_i - 1] if knee_i - 1 >= 0 else None
         right = cvvdp_curve[knee_i + 1] if knee_i + 1 < len(cvvdp_curve) else None
@@ -3070,7 +3080,7 @@ def format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, c
     return "\n".join(lines)
 
 
-def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, step):
+def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, step, reuse_data=False):
     if step == 9:
         logger.info(
             f"Detected knee at Q{knee_row['q']}, "
@@ -3093,16 +3103,17 @@ def print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, conf
         r["eff_band"] = band
         prev_band = band
 
-    output = format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step)
+    output = format_cvvdp_curve_output(cvvdp_curve, knee_i, knee_row, confidence_score, confidence_text, step, reuse_data)
 
     # console
-    if step == 9:
+    if step == 9 or reuse_data:
         print(output)
 
     # file
-    mode = "a" if step != 0 else "w"
-    with open(cvvdp_table_file, mode, encoding="utf-8") as f:
-        f.write(output + "\n")
+    if not reuse_data:
+        mode = "a" if step != 0 else "w"
+        with open(cvvdp_table_file, mode, encoding="utf-8") as f:
+            f.write(output + "\n")
 
 
 def detect_knee_by_curvature(cvvdp_curve, step):
@@ -4501,8 +4512,11 @@ def main():
                             qadjust_target = qadjust_data['cvvdp_weighted_score']
                             cvvdp_curve = qadjust_data['cvvdp']['curve']
                             cvvdp_table_file = os.path.join(output_folder, f"{output_name}_cvvdp_table.txt")
-                            knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 7)
-                            confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+                            if not os.path.isfile(cvvdp_table_file):
+                                raise FileNotFoundError(f"{cvvdp_table_file} not found.")
+                            else:
+                                with open(cvvdp_table_file, "r", encoding="utf-8") as f:
+                                    stored_cvvdp_data = f.read()
                             rewrite_cvvdp_table = True
                             chunk_cvvdp_scores = [
                                 {
@@ -4559,7 +4573,8 @@ def main():
         with open(probing_log_file, "w", newline="") as f:
             f.writelines(cvvdp_csv_lines)
     if rewrite_cvvdp_table:
-        print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 6)
+        with open(cvvdp_table_file, "w", encoding="utf-8") as f:
+            f.write(stored_cvvdp_data)
 
     if qadjust_mode == 3:
         if cvvdp_config is not None:
@@ -4628,8 +4643,7 @@ def main():
                 if qadjust_cycle != 1:
                     encode_params.append(f"--fgs-table \"{output_grain_table}\"")
             elif graintable:
-                if qadjust_cycle != 1:
-                    encode_params.append(f"--fgs-table \"{graintable}\"")
+                encode_params.append(f"--fgs-table \"{graintable}\"")
         elif encoder == 'rav1e':
             if graintable_method > 0:
                 create_fgs_table(encode_params, output_grain_table, scripts_folder, video_width, encode_script, graintable_sat, decode_method, encoder, threads, cpu, graintable_cpu, output_grain_file_encoded, output_grain_file_lossless,
@@ -4675,7 +4689,6 @@ def main():
     chunklist = []  # Helper list for producing the encoding and concatenation lists
     qadjust_original_file = os.path.join(scripts_folder, f"qadjust_original.avs")
 
-    # Run encoding commands with a set maximum of concurrent processes
     stored_encode_params = encode_params.copy()
     encode_commands, input_files, chunklist, chunklist_dict, encode_params = preprocess_chunks(encode_commands, input_files, chunklist, qadjust_cycle, stored_encode_params, scene_changes, video_length, credits_start_frame, min_chunk_length, q,
                                                                                                    credits_q, encoder, chunks_folder, rpu, qadjust_cpu, encode_script, qadjust_original_file,video_width, video_height, qadjust_b, qadjust_c,
@@ -4687,6 +4700,11 @@ def main():
 
     if qadjust or qadjust_only:
         if reuse_qadjust:
+            if rewrite_cvvdp_table:
+                knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 10)
+                confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 9, True)
+
             reused_q_values = [chunk['adjusted_Q'] for chunk in qadjust_data['chunks']]
             chunklist = sorted(chunklist, key=lambda x: x['chunk'], reverse=False)
             for i in range(len(chunklist)):
@@ -4848,7 +4866,7 @@ def main():
 
                 knee_i, knee_row = detect_knee_by_curvature(cvvdp_curve, 10)
                 confidence_score, confidence_text = compute_knee_confidence(cvvdp_curve, knee_i)
-                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 9)
+                print_cvvdp_curve_data(cvvdp_curve, cvvdp_table_file, knee_i, knee_row, confidence_score, confidence_text, 9, rewrite_cvvdp_table)
 
                 suggested_q, est_score, est_bitrate = suggest_q_and_target_cvvdp(cvvdp_curve, cvvdp_bias)
                 if cvvdp_bias != 0:
